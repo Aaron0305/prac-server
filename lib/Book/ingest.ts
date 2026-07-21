@@ -9,13 +9,13 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 //  CONFIGURACIÓN CENTRAL — ajusta aquí sin tocar la lógica
 // ─────────────────────────────────────────────
 const CONFIG = {
-  START_PAGE: 11,    // Página real del PDF donde comienza el contenido útil (salta índice/prefacio)
+  START_PAGE: 5,     // Página real del PDF donde comienza el contenido útil (solicitado desde hoja 5)
   CHUNK_SIZE: 200,   // Palabras por fragmento
   CHUNK_OVERLAP: 30,    // Palabras de solapamiento entre fragmentos para no perder contexto
   MIN_CHUNK_CHARS: 80,    // Mínimo de caracteres para considerar un chunk válido
   MAX_NOISE_RATIO: 0.15,  // Si más del 15% son símbolos raros → fragmento corrupto, se descarta
   BATCH_SIZE: 20,    // Fragmentos que se insertan en Supabase por llamada
-  MODEL: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', // Mejor para español e inglés
+  MODEL: 'Supabase/gte-small', // Modelo nativo de Supabase Edge Functions
   TABLE: 'knowledge_embeddings',
 };
 
@@ -168,15 +168,17 @@ interface ChunkData {
 //  DETECCIÓN DE TEMA/SECCIÓN DENTRO DEL CHUNK
 // ─────────────────────────────────────────────
 const TOPIC_PATTERNS: [RegExp, string][] = [
-  [/\b(grammar|gramática)\b/i, 'Grammar'],
-  [/\b(vocabulary|vocab|vocabulario)\b/i, 'Vocabulary'],
-  [/\b(pronunciation|pronunciación|intonation|stress)\b/i, 'Pronunciation'],
-  [/\b(reading|lectura)\b/i, 'Reading'],
-  [/\b(writing|escritura|write)\b/i, 'Writing'],
-  [/\b(listening|comprensión auditiva)\b/i, 'Listening'],
-  [/\b(speaking|conversación|pair work|role[- ]?play)\b/i, 'Speaking'],
-  [/\b(review|repaso|checkpoint)\b/i, 'Review'],
-  [/\b(test|exam|quiz|evaluación|assessment)\b/i, 'Assessment'],
+  [/\b(agente[s]?|agent[s]?)\b/i, 'Agentes'],
+  [/\b(búsqueda|busqueda|search|heurístic[ao]|heuristic[s]?|a\*)\b/i, 'Búsqueda'],
+  [/\b(conocimiento|lógica|logica|knowledge|logic)\b/i, 'Conocimiento y Lógica'],
+  [/\b(razonamiento|probabilidad|bayes|inferencia)\b/i, 'Razonamiento'],
+  [/\b(planificación|planificacion|planning)\b/i, 'Planificación'],
+  [/\b(aprendizaje|learning|machine learning|supervisado)\b/i, 'Aprendizaje Automático'],
+  [/\b(redes neuronales|neural networks|deep learning|aprendizaje profundo)\b/i, 'Redes Neuronales'],
+  [/\b(procesamiento del lenguaje|pln|nlp|lenguaje natural)\b/i, 'Lenguaje Natural'],
+  [/\b(visión|vision|percepción|percepcion)\b/i, 'Visión y Percepción'],
+  [/\b(robótica|robotica|robotics)\b/i, 'Robótica'],
+  [/\b(ética|etica|philosophy|filosofía)\b/i, 'Ética y Filosofía'],
 ];
 
 function detectTopics(text: string): string[] {
@@ -259,9 +261,9 @@ async function insertBatch(rows: object[], maxRetries = 3): Promise<void> {
 //  MAIN
 // ─────────────────────────────────────────────
 async function main() {
-  console.log('==========================================');
-  console.log(' INGESTIÓN RAG — TOP NOTCH (MEJORADA)   ');
-  console.log('==========================================\n');
+  console.log('==============================================');
+  console.log(' INGESTIÓN RAG — INTELIGENCIA ARTIFICIAL    ');
+  console.log('==============================================\n');
 
   // 1. Cargar modelo
   console.log(`1. Cargando modelo de embeddings: ${CONFIG.MODEL}`);
@@ -302,7 +304,7 @@ async function main() {
   console.log('4. Dividiendo en fragmentos con overlap (preservando páginas)...');
   const rawChunks = chunkTextWithOverlap(pagesData);
 
-  // Filtrar chunks cortos o corruptos y añadir el CONTEXTO DE UNIDAD
+  // Filtrar chunks cortos o corruptos y añadir el CONTEXTO DE CAPÍTULO/UNIDAD
   let currentUnitContext = "General / Intro";
   const chunks = rawChunks
     .filter(c => {
@@ -310,24 +312,16 @@ async function main() {
       return trimmed.length >= CONFIG.MIN_CHUNK_CHARS && !isCorrupted(trimmed);
     })
     .map(c => {
-      // DETECCIÓN DE UNIDAD/LECCIÓN (FIX: solo acepta números 1-14 para evitar
-      // falsos positivos como "UNIT 141" que en realidad era una página)
-      const unitMatch = c.text.match(/\b(UNIT|Unit)\s+(\d{1,2})\b/);
-      if (unitMatch) {
-        const num = parseInt(unitMatch[2]);
-        if (num >= 1 && num <= 14) {
-          currentUnitContext = `UNIT ${num}`;
-        }
-      }
-      const lessonMatch = c.text.match(/\b(LESSON|Lesson)\s+(\d{1,2})\b/);
-      if (lessonMatch) {
-        const num = parseInt(lessonMatch[2]);
-        if (num >= 1 && num <= 10) {
-          currentUnitContext = `${currentUnitContext} - LESSON ${num}`;
+      // DETECCIÓN DE CAPÍTULO O UNIDAD
+      const chapterMatch = c.text.match(/\b(CAPÍTULO|Capítulo|Capitulo|CHAPTER|Chapter|UNIDAD|Unidad|UNIT|Unit)\s+(\d{1,2})\b/);
+      if (chapterMatch) {
+        const num = parseInt(chapterMatch[2]);
+        if (num >= 1 && num <= 30) {
+          currentUnitContext = `Capítulo ${num}`;
         }
       }
       
-      // Detectar temas pedagógicos en el fragmento
+      // Detectar temas de Inteligencia Artificial en el fragmento
       const topics = detectTopics(c.text);
 
       // FIX: Separar "PageNum" de "Unit" para que FTS no confunda "page 11" con "unit 11"

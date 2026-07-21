@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getCorsHeaders } from "@/lib/cors";
 import Groq from "groq-sdk";
-import { pipeline } from "@huggingface/transformers";
+
 import { createClient } from "@supabase/supabase-js";
 import { franc } from "franc";
 import { Redis } from "@upstash/redis";
@@ -49,7 +49,7 @@ interface RagContext {
 // CONFIGURACIÓN CENTRAL
 // ============================================================
 const CONFIG = {
-    model: "llama-3.3-70b-versatile",
+    model: "llama-3.1-8b-instant",
     rag: {
         matchThreshold: 0.10,   // ← más bajo para capturar más fragmentos de la página
         matchCountDefault: 6,
@@ -115,59 +115,7 @@ setInterval(() => {
     }
 }, 5 * 60_000);
 
-// ============================================================
-// EMBEDDINGS (singleton + warm-up + timeout)
-// ============================================================
-let extractorInstance: any = null;
-let extractorLoading: Promise<any> | null = null;
-
-export const extractorStatus: {
-    state: "idle" | "loading" | "ready" | "error";
-    loadedAt?: Date;
-    lastError?: string;
-} = { state: "idle" };
-
-async function getExtractor() {
-    if (extractorInstance) return extractorInstance;
-    if (!extractorLoading) {
-        log("info", "Embeddings", "Cargando modelo...");
-        extractorStatus.state = "loading";
-        extractorLoading = pipeline(
-            "feature-extraction",
-            "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
-        )
-            .then((inst: any) => {
-                extractorInstance = inst;
-                extractorStatus.state = "ready";
-                extractorStatus.loadedAt = new Date();
-                log("info", "Embeddings", "Modelo listo");
-                return inst;
-            })
-            .catch((err: unknown) => {
-                extractorLoading = null;
-                extractorStatus.state = "error";
-                extractorStatus.lastError = String(err);
-                throw err;
-            });
-    }
-    return extractorLoading;
-}
-
-// getExtractor().catch(() => { }); // Se cargará bajo demanda para ahorrar RAM al inicio
-
-async function getEmbeddingWithTimeout(text: string): Promise<number[]> {
-    const extractor = await Promise.race([
-        getExtractor(),
-        new Promise<never>((_, reject) =>
-            setTimeout(
-                () => reject(new Error("embedding_timeout")),
-                CONFIG.limits.embeddingTimeoutMs
-            )
-        ),
-    ]);
-    const output = await (extractor as any)(text, { pooling: "mean", normalize: true });
-    return Array.from(output.data as Float32Array);
-}
+// Embeddings moved to Supabase Edge Functions
 
 // ============================================================
 // MÉTRICAS
@@ -276,25 +224,23 @@ function extractStructuralKeywords(message: string): string {
         while ((m = pattern.exec(message)) !== null) keywords.push(`PageNum ${m[1]}`);
     }
 
-    const unitPatterns = [/\b(?:unit|unidad)\s*(\d+)/gi, /\bu(\d{1,2})\b/gi];
-    for (const pattern of unitPatterns) {
+    const chapterPatterns = [/\b(?:cap[ií]tulo|capitulo|chapter|cap|unit|unidad)\s*(\d+)/gi, /\bc(\d{1,2})\b/gi];
+    for (const pattern of chapterPatterns) {
         let m;
-        while ((m = pattern.exec(message)) !== null) keywords.push(`UNIT ${m[1]}`);
+        while ((m = pattern.exec(message)) !== null) keywords.push(`Capítulo ${m[1]}`);
     }
 
-    const lessonMatch = message.match(/\b(?:lesson|lecci[oó]n|leccion)\s*(\d+)/i);
-    if (lessonMatch) keywords.push(`LESSON ${lessonMatch[1]}`);
-
     const topicKeywords: [RegExp, string][] = [
-        [/\b(?:grammar|gramática|gramatica)\b/i, "grammar"],
-        [/\b(?:vocabulary|vocabulario|vocab)\b/i, "vocabulary"],
-        [/\b(?:speaking|conversación|oral)\b/i, "speaking"],
-        [/\b(?:listening|comprensión auditiva|audio)\b/i, "listening"],
-        [/\b(?:reading|lectura)\b/i, "reading"],
-        [/\b(?:writing|escritura|written)\b/i, "writing"],
-        [/\b(?:pronunciation|pronunciación)\b/i, "pronunciation"],
-        [/\b(?:exercise|ejercicio|practice|práctica)\b/i, "exercise"],
-        [/\b(?:review|repaso|test|exam|quiz)\b/i, "review assessment"],
+        [/\b(?:agente|agentes|agent)\b/i, "agentes"],
+        [/\b(?:búsqueda|busqueda|search|heurística|a\*)\b/i, "búsqueda"],
+        [/\b(?:conocimiento|lógica|logica|knowledge)\b/i, "conocimiento"],
+        [/\b(?:razonamiento|probabilidad|bayes)\b/i, "razonamiento"],
+        [/\b(?:planificación|planificacion|planning)\b/i, "planificación"],
+        [/\b(?:aprendizaje|learning|machine learning)\b/i, "aprendizaje"],
+        [/\b(?:redes neuronales|deep learning)\b/i, "redes neuronales"],
+        [/\b(?:procesamiento del lenguaje|pln|nlp)\b/i, "lenguaje natural"],
+        [/\b(?:visión|vision|percepción)\b/i, "visión"],
+        [/\b(?:robótica|robotica|robotics)\b/i, "robótica"],
     ];
     for (const [pattern, keyword] of topicKeywords) {
         if (pattern.test(message)) keywords.push(keyword);
@@ -317,14 +263,23 @@ function extractPageNumbers(message: string): number[] {
 }
 
 function extractUnitNumber(message: string): string | null {
-    const m = message.match(/\b(?:unit|unidad)\s*(\d+)/i);
-    if (m && parseInt(m[1]) >= 1 && parseInt(m[1]) <= 14) return `UNIT ${m[1]}`;
+    const m = message.match(/\b(?:cap[ií]tulo|capitulo|chapter|unit|unidad)\s*(\d+)/i);
+    if (m && parseInt(m[1]) >= 1 && parseInt(m[1]) <= 30) return `Capítulo ${m[1]}`;
     return null;
+}
+
+function isGreetingMessage(message: string): boolean {
+    const clean = message.trim().toLowerCase().replace(/[¡!¿?,.]/g, "");
+    const greetingWords = [
+        "hola", "hola buenas", "hola buenas noches", "buenas noches", "buenos dias", "buenas tardes",
+        "saludos", "hey", "hola como estas", "quien eres", "quien eres tu", "que puedes hacer",
+        "gracias", "muchas gracias", "ok", "okey", "entendido", "perfecto"
+    ];
+    return greetingWords.includes(clean) || (clean.length <= 15 && (clean.startsWith("hola") || clean.startsWith("buenas") || clean.startsWith("gracias")));
 }
 
 // ============================================================
 // RAG — búsqueda de contexto
-// ← CAMBIO: usa matchCount diferente según tipo de pregunta
 // ============================================================
 async function fetchRelevantContext(
     query: string,
@@ -332,8 +287,14 @@ async function fetchRelevantContext(
 ): Promise<{ contextText: string; ragContext: RagContext }> {
     const start = Date.now();
 
-    const queryEmbedding = await getEmbeddingWithTimeout(query);
-    const ftsKeywords = extractStructuralKeywords(query);
+    // 🚀 SALUDOS / CORTE SÍA: Saltar RAG y embeddings por completo (Latencia 0ms)
+    if (isGreetingMessage(query)) {
+        return {
+            contextText: "",
+            ragContext: { fragments: [], totalFragments: 0, queryMode: "hybrid" }
+        };
+    }
+
     const pageNumbers = extractPageNumbers(query);
     const isMultiPage = pageNumbers.length > 1;
     const isPageTargeted = pageNumbers.length > 0;
@@ -344,43 +305,76 @@ async function fetchRelevantContext(
             : CONFIG.rag.matchCountDefault;
 
     const matchThreshold = questionType === "page" || isMultiPage ? 0.08 : CONFIG.rag.matchThreshold;
-
     const queryMode: RagContext["queryMode"] = isPageTargeted ? "page" : unitFilter ? "unit" : "hybrid";
     const supabase = getSupabaseClient();
 
     let allFragments: KnowledgeFragment[] = [];
 
     if (isPageTargeted) {
-        // Fetch para cada página solicitada en paralelo
-        const promises = pageNumbers.map(pageNum =>
-            (supabase.rpc as any)("hybrid_search_knowledge", {
-                query_embedding: queryEmbedding,
-                query_text: `PageNum ${pageNum}`,
-                match_threshold: matchThreshold,
-                match_count: matchCount,
-                page_filter: pageNum,
-                unit_filter: null,
-            })
-        );
+        // 🚀 BÚSQUEDA DIRECTA Y ULTRA RÁPIDA DE PÁGINA (JSONB exacto en Supabase)
+        const promises = pageNumbers.map(async pageNum => {
+            const { data, error } = await (supabase.from as any)("knowledge_embeddings")
+                .select("content, metadata")
+                .contains("metadata", { pageNumber: pageNum })
+                .limit(matchCount);
+
+            if (error || !data || data.length === 0) {
+                const fallback = await (supabase.from as any)("knowledge_embeddings")
+                    .select("content, metadata")
+                    .contains("metadata", { startPage: pageNum })
+                    .limit(matchCount);
+                return (fallback.data ?? []).map((row: any) => ({
+                    content: row.content,
+                    similarity: 1.0,
+                    metadata: row.metadata,
+                }));
+            }
+
+            return data.map((row: any) => ({
+                content: row.content,
+                similarity: 1.0,
+                metadata: row.metadata,
+            }));
+        });
+
         const results = await Promise.all(promises);
-        for (const res of results) {
-            if (res.data) allFragments.push(...(res.data as KnowledgeFragment[]));
+        for (const fragments of results) {
+            allFragments.push(...fragments);
         }
     } else {
-        const { data, error } = await (supabase.rpc as any)("hybrid_search_knowledge", {
-            query_embedding: queryEmbedding,
-            query_text: ftsKeywords,
-            match_threshold: matchThreshold,
-            match_count: matchCount,
-            page_filter: null,
-            unit_filter: unitFilter,
+        const ftsKeywords = extractStructuralKeywords(query);
+
+        // 🚀 LLAMADA ULTRA-RÁPIDA A LA EDGE FUNCTION DE SUPABASE
+        const edgeFunctionUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/embed-query`;
+        const edgeFunctionKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // Usado como Auth Token
+        
+        const response = await fetch(edgeFunctionUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${edgeFunctionKey}`,
+            },
+            body: JSON.stringify({
+                query,
+                matchCount,
+                matchThreshold,
+                ftsKeywords,
+                pageFilter: null,
+                unitFilter: unitFilter,
+            }),
         });
-        if (error) throw new Error(`Supabase RPC error: ${error.message}`);
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Edge Function error: ${response.status} ${errText}`);
+        }
+
+        const { data } = await response.json();
         allFragments = data ?? [];
     }
 
     log("info", "RAG", `Búsqueda en ${Date.now() - start}ms`, {
-        mode: queryMode, pages: pageNumbers, matchCount, ftsKeywords,
+        mode: queryMode, pages: pageNumbers, matchCount,
     });
 
     const fragments = allFragments;
@@ -418,58 +412,80 @@ async function fetchRelevantContext(
 
 // ============================================================
 // SYSTEM PROMPT
-// ← CAMBIO: instrucciones específicas para preguntas de página
 // ============================================================
 function buildSystemPrompt(
     contextText: string,
     lang: "es" | "en" | "auto",
-    questionType: QuestionType   // ← NUEVO parámetro
+    questionType: QuestionType
 ): string {
     const langInstruction = {
         es: "SIEMPRE responde en español, independientemente del idioma del contenido del libro.",
         en: "ALWAYS respond in English, regardless of the language used in the book content.",
-        auto: "Detect the language of the teacher's question and respond in that same language.",
+        auto: "Detecta el idioma de la pregunta del usuario y responde en ese mismo idioma.",
     }[lang];
 
-    // ← CAMBIO: instrucciones de longitud según tipo
+    // ── Instrucciones adaptativas por tipo de pregunta ──
     const lengthInstruction = questionType === "page"
-        ? `INSTRUCCIÓN DE RESPUESTA PARA PÁGINAS/RETROALIMENTACIÓN:
-- Si te piden retroalimentación o análisis de varias páginas (ej. 40, 39, 38): Analiza TODAS las páginas solicitadas basándote en el contenido. Brinda una retroalimentación pedagógica clara de la progresión de los temas, y FINALIZA CON UN TIP ESPECIAL O CONSEJO de cómo enseñar esas tres páginas o temas en conjunto.
-- Si solo te preguntan qué dice una página: LISTA TODO EL CONTENIDO de esa página sin omitir nada. Sé exhaustivo: el profesor quiere saber exactamente qué hay para preparar su clase.
-- Organiza la información con secciones claras usando el contenido exacto recuperado.`
+        ? `FORMATO DE RESPUESTA — CONSULTA DE PÁGINA(S):
+- Si preguntan por UNA página concreta: Extrae y presenta TODO el contenido de esa página, organizado en secciones claras.
+- Cita las páginas con el formato [Página X].`
         : questionType === "complex"
-            ? `INSTRUCCIÓN DE RESPUESTA:
-- Esta es una pregunta compleja (plan de clase, examen, actividades). Sé detallado y estructurado.
-- Usa secciones con encabezados cuando ayude a organizar la respuesta.
-- Si envuelve un repaso de varios temas, al final provee un "Tip Especial" como recomendación docente.`
-            : `INSTRUCCIÓN DE RESPUESTA:
-- SÉ CONCISO. Responde en máximo 3-5 líneas.
-- Usa viñetas SOLO cuando sea necesario listar cosas.`;
+            ? `FORMATO DE RESPUESTA — CONSULTA COMPLEJA:
+- Estructura la respuesta con encabezados Markdown claros (##, ###).
+- Incluye pseudocódigo o fórmulas si aplican al tema.`
+            : `FORMATO DE RESPUESTA — CONSULTA SIMPLE / SALUDO:
+- Si el usuario está saludando ("hola", "buenas noches", etc.), responde con un saludo amable y breve como ARIA e invítalo a preguntar sobre el libro.
+- Si es una pregunta breve sobre IA, responde directo al grano (3-6 líneas).`;
 
+    // ── Contexto del libro recuperado por RAG ──
     const bookContext = contextText.length > 0
-        ? `\n\n=== CONTENIDO OFICIAL DEL LIBRO TOP NOTCH ===\n${contextText}\n==============================================\n\nBasa tu respuesta ÚNICAMENTE en el contenido anterior. Cita páginas explícitamente.`
-        : "\n\nNOTA: No se encontró contenido específico del libro. Usa tu conocimiento pedagógico y avisa que no provino del libro.";
+        ? `\n\n╔══════════════════════════════════════════════════════════════╗
+║  FRAGMENTOS RECUPERADOS DEL LIBRO (fuente autoritativa)     ║
+╚══════════════════════════════════════════════════════════════╝
+${contextText}
+══════════════════════════════════════════════════════════════
 
-    return `Eres un asistente pedagógico EXCLUSIVO para profesores de inglés que utilizan el libro Top Notch.
+INSTRUCCIÓN CRÍTICA: Tu respuesta DEBE basarse en los fragmentos anteriores cuando contengan la información. Cita las páginas con [Página X].`
+        : `\n\n(Nota: No hay fragmentos de texto adjuntos para esta consulta. Si el usuario está saludando, presentándose o preguntando en general sobre el libro de IA, responde amablemente preséntandote como ARIA e invitándolo a realizar consultas del libro).`;
 
-IDIOMA: ${langInstruction}
+    // ── SYSTEM PROMPT PRINCIPAL ──
+    return `Eres **ARIA** (Asistente de Referencia en Inteligencia Artificial), un asistente académico de élite especializado EXCLUSIVAMENTE en el libro:
 
-RESTRICCIÓN ABSOLUTA DE TEMA:
-- SOLO puedes responder preguntas de: enseñanza de inglés, libro Top Notch, planes de clase, retroalimentación pedagógica, didáctica y resolución de dudas de la materia.
-- NO respondas temas ajenos bajo NINGUNA circunstancia.
+📖 **"Inteligencia Artificial: Un Enfoque Moderno" (2ª Edición)**
+✍️ Autores: Stuart J. Russell & Peter Norvig
 
-TU ROL Y CONOCIMIENTO:
-- Conoces a profundidad el libro Top Notch y su metodología.
-- Brindas "Feedback" analítico cuando te preguntan por varias páginas consecutivas y propones cómo unirlas u optimizar el tiempo.
+═══════════════════════════════════════════
+🌐 IDIOMA
+═══════════════════════════════════════════
+${langInstruction}
 
-${lengthInstruction}
+═══════════════════════════════════════════
+🔒 RESTRICCIÓN DE TEMA
+═══════════════════════════════════════════
+- Tu dominio principal es la Inteligencia Artificial del libro de Russell & Norvig.
+- PERMITE saludos amables de cortesía, presentaciones y preguntas sobre los temas del libro.
+- SOLO si el usuario pregunta algo TOTALMENTE AJENO a la Inteligencia Artificial (recetas de cocina, deportes, política, películas), responde EXACTAMENTE:
+  "❌ Lo siento, solo puedo ayudarte con temas del libro *Inteligencia Artificial: Un Enfoque Moderno* de Russell & Norvig. ¿Tienes alguna duda sobre IA?"
 
-REGLAS GENERALES:
-1. Cuando el libro tenga el contenido, menciona la página brevemente.
-2. Si algo NO está en el libro, dilo en una línea.
-3. Para planes de clase (SOLO si lo piden): incluye objetivo, duración y materiales.
-4. PROHIBICIÓN ABSOLUTA DE ALUCINAR: No inventes actividades ni ejercicios que no estén EXACTAMENTE en el fragmento recuperado.
-5. No repitas información obvia. Sé natural y directo.
+═══════════════════════════════════════════
+🧠 TU ROL Y EXPERTISE
+═══════════════════════════════════════════
+Eres un experto en IA con conocimiento enciclopédico de los 27 capítulos del libro. Si te saludan ("hola", "buenas noches"), saluda cordialmente, preséntate brevemente como ARIA y menciona que estás listo para responder cualquier duda sobre los temas o capítulos del libro de Russell & Norvig.
+
+═══════════════════════════════════════════
+📋 ${lengthInstruction}
+═══════════════════════════════════════════
+═══════════════════════════════════════════
+⚖️ REGLAS DE INTEGRIDAD
+═══════════════════════════════════════════
+1. **Citación obligatoria**: Cuando el contenido provenga del libro, cita la página exacta [Página X].
+2. **Transparencia**: Si algo NO está en los fragmentos recuperados, dilo explícitamente en una línea.
+3. **Anti-alucinación estricta**: NUNCA inventes datos, cifras, nombres de algoritmos, teoremas o resultados que no estén en el fragmento recuperado. Si no tienes la información, di "No tengo ese dato específico del libro".
+4. **Pseudocódigo fiel**: Si el libro presenta pseudocódigo de un algoritmo, reprodúcelo fielmente. No lo modifiques ni "mejores".
+5. **Notación matemática**: Usa notación clara y consistente con la del libro.
+6. **Formato profesional**: Usa Markdown (encabezados, viñetas, código, negrita) para que la respuesta sea visualmente clara y fácil de estudiar.
+7. **Sin redundancia**: No repitas la pregunta del usuario ni agregues introducciones genéricas. Ve directo al grano.
+8. **Navegación**: Cuando sea útil, indica al usuario "Para profundizar, revisa el Capítulo X, sección Y (página Z)" para que pueda ir directamente a la fuente.
 ${bookContext}`;
 }
 
@@ -545,7 +561,7 @@ export async function GET(request: Request) {
             {
                 status: "ok",
                 ts: new Date().toISOString(),
-                extractor: extractorStatus,
+                extractor: "edge_functions",
                 redis: redisOk ? "configured" : "fallback_memory",
                 metrics: {
                     totalRequests: metrics.totalRequests,
