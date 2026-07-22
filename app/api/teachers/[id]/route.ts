@@ -66,6 +66,27 @@ export async function DELETE(
     try {
         const { id } = await params;
 
+        // 1. Eliminar mensajes de chat asociados al maestro
+        const { error: chatError } = await supabase
+            .from("chat_messages")
+            .delete()
+            .eq("teacher_id", id);
+
+        if (chatError) {
+            console.warn("Advertencia al eliminar mensajes de chat del maestro:", chatError);
+        }
+
+        // 2. Desvincular estudiantes asignados a este maestro
+        const { error: studentError } = await supabase
+            .from("students")
+            .update({ teacher_id: null })
+            .eq("teacher_id", id);
+
+        if (studentError) {
+            console.warn("Advertencia al desvincular estudiantes:", studentError);
+        }
+
+        // 3. Eliminar maestro de la base de datos
         const { error } = await supabase
             .from("teachers")
             .delete()
@@ -74,7 +95,7 @@ export async function DELETE(
         if (error) {
             console.error("Error deleting teacher:", error);
             return NextResponse.json(
-                { error: "Error al eliminar maestro" },
+                { error: `Error al eliminar maestro: ${error.message}` },
                 { status: 500, headers: corsHeaders }
             );
         }
