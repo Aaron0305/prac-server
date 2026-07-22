@@ -793,7 +793,9 @@ export async function POST(request: Request) {
         const fallbackModels = [
             CONFIG.model, // "llama-3.3-70b-versatile"
             "llama-3.1-8b-instant",
-            "mixtral-8x7b-32768",
+            "llama3-70b-8192",
+            "llama3-8b-8192",
+            "gemma2-9b-it",
         ];
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -814,11 +816,31 @@ export async function POST(request: Request) {
             } catch (modelErr) {
                 const isRateLimit = modelErr instanceof Error && (modelErr.message.includes("rate_limit") || modelErr.message.includes("429"));
                 log("warn", "GroqFallback", `Fallo en modelo ${targetModel} (${isRateLimit ? "Rate Limit" : "Error"}), probando fallback...`);
+                // Breve pausa de 200ms si es rate limit antes de probar el siguiente modelo
+                if (isRateLimit) await new Promise(res => setTimeout(res, 200));
             }
         }
 
         if (!groqStream) {
-            throw new Error("Todos los modelos de Groq alcanzaron el límite de tasa. Intenta en un momento.");
+            log("warn", "Groq", "Todos los modelos de Groq alcanzaron el límite de cuota (Rate Limit)");
+            const friendlyMsg = "⚠️ *El servicio de IA ha alcanzado temporalmente el límite de peticiones de Groq (Rate Limit por minuto). Por favor, espera 10 segundos e intenta tu consulta nuevamente.*";
+            const encoder = new TextEncoder();
+            const fallbackStream = new ReadableStream({
+                start(controller) {
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: friendlyMsg })}\n\n`));
+                    controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+                    controller.close();
+                }
+            });
+            return new Response(fallbackStream, {
+                status: 200,
+                headers: {
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    ...corsHeaders,
+                },
+            });
         }
 
         const encoder = new TextEncoder();
