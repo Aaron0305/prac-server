@@ -529,13 +529,9 @@ async function fetchRelevantContext(
 
     const contextText = fragments
         .map((f, idx) => {
-            const page = f.metadata?.pageNumber ?? f.metadata?.startPage;
-            const unit = f.metadata?.unit ?? "";
+            const page = f.metadata?.printedPage ?? f.metadata?.pageNumber ?? f.metadata?.startPage;
             const topics = f.metadata?.topics?.join(", ") ?? "";
-            let header = page && unit ? `[${unit} — Página ${page}]`
-                : page ? `[Página ${page}]`
-                    : unit ? `[${unit}]`
-                        : `[Fragmento ${idx + 1}]`;
+            let header = page ? `[Página del Libro: ${page}]` : `[Fragmento ${idx + 1}]`;
             if (topics) header += ` (Temas: ${topics})`;
             return `${header}\n${f.content}`;
         })
@@ -566,19 +562,19 @@ function buildSystemPrompt(
 ${langLine}
 
 COBERTURA DE LA BASE DE DATOS:
-- Tu sistema cuenta con la TOTALIDAD del libro 'Inteligencia Artificial: Un Enfoque Moderno' (2ª Edición, 27 capítulos, 1,220 páginas) indexado y disponible en la base de datos de Supabase.
+- Tu sistema cuenta con la TOTALIDAD del libro 'Inteligencia Artificial: Un Enfoque Moderno' (2ª Edición, 1,220 páginas) indexado y disponible en la base de datos de Supabase.
 - Si el usuario pregunta si el libro está completo, hasta qué página tienes acceso o si tienes todo el texto, confirma con absoluta seguridad que la totalidad de las 1,220 páginas del libro está registrada en el sistema. NUNCA digas que solo tienes acceso a unos pocos fragmentos.
 
 FORMATO Y ESTILO DE RESPUESTA (ESTILO CHATGPT):
 1. Organiza las respuestas de manera muy visual, estructurada y limpia utilizando Markdown.
-2. Usa un encabezado principal claro con ## para el tema.
-3. Utiliza etiquetas en negrita con salto de línea para organizar la información:
-   - **Concepto:** (Explicación clara y elegante)
-   - **Características:** (Lista con viñetas)
-   - **Ejemplo / Aplicación:** (Caso práctico del libro)
-4. Agrega un salto de línea limpio entre cada bloque para que la lectura sea cómoda.
-5. Al final de la respuesta, si usas información del libro, añade siempre el bloque de fuente:
-► **FUENTE**: *Inteligencia Artificial: Un Enfoque Moderno* - Capítulo [N] - Página(s) [X]${bookContext}`;
+2. Usa un encabezado principal claro con ## para el tema (ej. ## Contenido de la Página X).
+3. Escribe un resumen rico, bien explicado y equilibrado (2 a 4 párrafos/secciones bien desarrolladas), sin escatimar información relevante pero sin caer en textos interminables.
+4. Utiliza etiquetas en negrita con salto de línea para organizar los conceptos del texto:
+   - **Concepto Principal:** (Explicación clara y rica)
+   - **Desarrollo Teórico / Temas:** (Explicación detallada con viñetas)
+   - **Puntos Clave:** (Detalles del texto)
+5. Al final de la respuesta, si usas información del libro, añade SIEMPRE el bloque de fuente exactamente en este formato (SIN mencionar unidades ni capítulos):
+► **FUENTE**: *Inteligencia Artificial: Un Enfoque Moderno* - Página(s) [X]${bookContext}`;
 }
 
 // VALIDACIÓN
