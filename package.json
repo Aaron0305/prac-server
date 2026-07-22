@@ -43,8 +43,7 @@
     "typescript": "^5"
   },
   "engines": {
-    "node": ">=20.0.0",
-    "pnpm": ">=10.26.0"
+    "node": "20.x"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
