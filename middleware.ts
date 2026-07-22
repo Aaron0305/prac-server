@@ -2,13 +2,14 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 export function middleware(request: NextRequest) {
-    // Determinar el origen permitido
     const origin = request.headers.get("origin") || "";
-    const allowedOrigins = [
-        "http://localhost:3000",
-        "https://ingles-frontend.vercel.app"
-    ];
-    const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
+    const isAllowed = !origin || 
+        origin.startsWith("http://localhost:") || 
+        origin.startsWith("http://127.0.0.1:") || 
+        origin.endsWith(".vercel.app") || 
+        origin.endsWith(".onrender.com");
+    
+    const allowOrigin = isAllowed ? (origin || "*") : "*";
 
     // Handle preflight requests
     if (request.method === "OPTIONS") {

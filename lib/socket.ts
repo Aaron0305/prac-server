@@ -42,14 +42,17 @@ export function initSocketServer(httpServer: HttpServer): SocketIOServer {
 
     io = new SocketIOServer(httpServer, {
         cors: {
-            origin: [
-                "http://localhost:3000",
-                "http://localhost:3001",
-                "http://127.0.0.1:3000",
-                "http://127.0.0.1:3001",
-                "https://ingles-frontend.vercel.app",
-                "https://ingles-backend-bk4n.onrender.com"
-            ],
+            origin: (requestOrigin, callback) => {
+                if (!requestOrigin || 
+                    requestOrigin.startsWith("http://localhost:") || 
+                    requestOrigin.startsWith("http://127.0.0.1:") || 
+                    requestOrigin.endsWith(".vercel.app") || 
+                    requestOrigin.endsWith(".onrender.com")) {
+                    callback(null, true);
+                } else {
+                    callback(null, true);
+                }
+            },
             methods: ["GET", "POST"],
             credentials: true,
         },
