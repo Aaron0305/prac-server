@@ -474,29 +474,36 @@ async function fetchRelevantContext(
     } else if (allFragments.length === 0) {
         const ftsKeywords = extractStructuralKeywords(query);
 
-        // LLAMADA A LA EDGE FUNCTION DE SUPABASE
-        const edgeFunctionUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/embed-query`;
-        const edgeFunctionKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-        
-        const response = await fetch(edgeFunctionUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${edgeFunctionKey}`,
-            },
-            body: JSON.stringify({
-                query: normalized.cleanQuery,
-                matchCount,
-                matchThreshold,
-                ftsKeywords,
-                pageFilter: null,
-                unitFilter: unitFilter,
-            }),
-        });
+        // LLAMADA A LA EDGE FUNCTION DE SUPABASE (protegida con try/catch)
+        try {
+            const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+            const edgeFunctionKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+            
+            if (supabaseUrl && edgeFunctionKey) {
+                const edgeFunctionUrl = `${supabaseUrl}/functions/v1/embed-query`;
+                const response = await fetch(edgeFunctionUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${edgeFunctionKey}`,
+                    },
+                    body: JSON.stringify({
+                        query: normalized.cleanQuery,
+                        matchCount,
+                        matchThreshold,
+                        ftsKeywords,
+                        pageFilter: null,
+                        unitFilter: unitFilter,
+                    }),
+                });
 
-        if (response.ok) {
-            const { data } = await response.json();
-            allFragments = data ?? [];
+                if (response.ok) {
+                    const { data } = await response.json();
+                    allFragments = data ?? [];
+                }
+            }
+        } catch (edgeErr) {
+            log("warn", "RAG", "No se pudo conectar a la Edge Function de Supabase, continuando...", edgeErr);
         }
     }
 
