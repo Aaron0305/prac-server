@@ -49,17 +49,17 @@ interface RagContext {
 // CONFIGURACIÓN CENTRAL
 // ============================================================
 const CONFIG = {
-    model: "llama-3.1-8b-instant",
+    model: "llama-3.3-70b-versatile",
     rag: {
-        matchThreshold: 0.10,   // ← más bajo para capturar más fragmentos de la página
-        matchCountDefault: 6,
-        matchCountExtended: 10,
-        matchCountPage: 15,     // ← NUEVO: páginas necesitan más fragmentos
+        matchThreshold: 0.08,
+        matchCountDefault: 8,
+        matchCountExtended: 12,
+        matchCountPage: 15,
     },
     limits: {
         maxMessageLength: 2000,
         maxHistoryMessages: 10,
-        requestTimeoutMs: 25_000,
+        requestTimeoutMs: 45_000,
         embeddingTimeoutMs: 8_000,
         rateLimitWindow: 60,
         rateLimitMaxReqs: 20,
@@ -174,18 +174,19 @@ function detectLanguage(text: string): "es" | "en" | "auto" {
 type QuestionType = "simple" | "complex" | "page";
 
 function detectQuestionType(message: string): QuestionType {
-    // Primero verificar si es pregunta de página — tiene prioridad
-    const isPageQuery = /\b(?:page|p[aá]gina|pagina|p\.?|pg\.?)\s*\d+/i.test(message) ||
-        /\bqu[eé]\s+(?:hay|tiene|contiene|dice|sale|aparece)/i.test(message) &&
-        /\b(?:page|p[aá]gina)\b/i.test(message);
-    if (isPageQuery) return "page";
+    // Incluye variantes con typos comunes: pragina, pagna, pagia, pagian
+    const pageWordPattern = /\b(?:page|p[aá]ginas?|paginas?|pr[aá]ginas?|pag[ia]nas?|p\.?|pg\.?)\s*\d+/i;
+    const pageContextPattern = /\b(?:qu[eé]|qu[eé] hay|qu[eé] dice|qu[eé] sale|qu[eé] contiene|muestra|dame|ve)\b.{0,30}\b\d{2,4}\b/i;
+    if (pageWordPattern.test(message) || pageContextPattern.test(message)) return "page";
 
     const complexKeywords = [
-        "plan de clase", "planificación", "examen", "evaluación", "actividades para",
-        "ejercicios para", "cómo enseñar", "estrategia", "unidad completa", "semana",
-        "genera", "crea", "diseña", "elabora",
+        "plan de clase", "planificacion", "examen", "evaluacion", "actividades para",
+        "ejercicios para", "como ensenar", "estrategia", "unidad completa", "semana",
+        "genera", "crea", "disena", "elabora",
         "lesson plan", "exam", "test", "quiz", "activities for", "how to teach",
-        "unit", "full lesson", "generate", "create", "design",
+        "full lesson", "generate", "create", "design",
+        "explica detalladamente", "describe en detalle", "compara", "diferencias entre",
+        "ventajas y desventajas", "resume el capitulo",
     ];
     const lower = message.toLowerCase();
     return complexKeywords.some(k => lower.includes(k)) ? "complex" : "simple";
@@ -215,16 +216,75 @@ function isFollowUpMessage(message: string): boolean {
 // ============================================================
 // EXTRACCIÓN DE KEYWORDS
 // ============================================================
-function extractStructuralKeywords(message: string): string {
-    const keywords: string[] = [];
+// ============================================================
+// NORMALIZADOR Y CORRECTOR DE CONSULTAS (Resiliencia ante typos)
+// ============================================================
+function extractSectionNumbers(message: string): string[] {
+    const sections: string[] = [];
+    const regex = /\b(?:punto|subtema|secci[oó]n|sec\.?)\s*(\d{1,2}\.\d{1,2})\b|\b(\d{1,2}\.\d{1,2})\b/gi;
+    let m;
+    while ((m = regex.exec(message)) !== null) {
+        const sec = m[1] || m[2];
+        if (sec && !sections.includes(sec)) sections.push(sec);
+    }
+    return sections;
+}
 
-    const pagePatterns = [/\b(?:page|página|pagina|p\.|pg\.?)\s*(\d+)/gi, /\bp(\d+)\b/gi];
-    for (const pattern of pagePatterns) {
-        let m;
-        while ((m = pattern.exec(message)) !== null) keywords.push(`PageNum ${m[1]}`);
+function normalizeUserQuery(message: string): { cleanQuery: string; detectedPages: number[]; detectedSections: string[] } {
+    let text = message.toLowerCase().trim();
+
+    // 1. Correcciones de typos comunes en páginas ("pafg 84", "pagian 84", "pragina 84")
+    text = text.replace(/\b(pafg|pagian|pagna|pagia|pragina|praginas|pag\.?|pgs?\.?)\b/g, "pagina");
+
+    // 2. Corrección de faltas de ortografía comunes en conceptos de IA
+    const typoDictionary: [RegExp, string][] = [
+        [/\bunm\s+neourna\b|\bneourna\b|\bneournas\b|\bneurna\b|\bneuronas?\b/gi, "neuronas redes neuronales"],
+        [/\bbusqueda\s+a\b|\ba\*\b|\ba\s+estrella\b/gi, "búsqueda a* heurística"],
+        [/\bagente\s+reactivo\b|\bagentes\s+reactivos\b/gi, "agentes reactivos reflejos"],
+        [/\blogica\s+de\s+primer\s+orden\b|\bfol\b/gi, "lógica de primer orden"],
+        [/\bproposicional\b|\btabla\s+de\s+verdad\b/gi, "lógica proposicional"],
+        [/\bbayes\b|\bmarcov\b|\bmarkov\b/gi, "redes bayesianas markov"],
+    ];
+
+    let cleanQuery = text;
+    for (const [regex, replacement] of typoDictionary) {
+        if (regex.test(text)) {
+            cleanQuery += " " + replacement;
+        }
     }
 
-    const chapterPatterns = [/\b(?:cap[ií]tulo|capitulo|chapter|cap|unit|unidad)\s*(\d+)/gi, /\bc(\d{1,2})\b/gi];
+    // 3. Extracción de páginas y secciones
+    const detectedPages: number[] = [];
+    const pageMatches = text.match(/\b(?:pagina|p)\s*(\d{1,4})\b/g);
+    if (pageMatches) {
+        for (const m of pageMatches) {
+            const num = m.match(/\d+/);
+            if (num) detectedPages.push(parseInt(num[0]));
+        }
+    }
+    if (detectedPages.length === 0) {
+        const isolatedNum = text.match(/\b(?:dice|trata|hay|ver|contenido|que|sale|en)\b.{0,15}\b(\d{1,4})\b/i);
+        if (isolatedNum) detectedPages.push(parseInt(isolatedNum[1]));
+    }
+
+    const detectedSections = extractSectionNumbers(message);
+
+    return {
+        cleanQuery: [...new Set(cleanQuery.split(/\s+/))].join(" "),
+        detectedPages: [...new Set(detectedPages)],
+        detectedSections
+    };
+}
+
+function extractStructuralKeywords(message: string): string {
+    const { cleanQuery, detectedPages } = normalizeUserQuery(message);
+    const keywords: string[] = [];
+
+    for (const p of detectedPages) {
+        keywords.push(`PageNum ${p}`);
+    }
+
+    const chapterPatterns = [/\b(?:capitulo|chapter|cap|unit|unidad)\s*(\d+)/gi, /\bc(\d{1,2})\b/gi];
     for (const pattern of chapterPatterns) {
         let m;
         while ((m = pattern.exec(message)) !== null) keywords.push(`Capítulo ${m[1]}`);
@@ -236,28 +296,31 @@ function extractStructuralKeywords(message: string): string {
         [/\b(?:conocimiento|lógica|logica|knowledge)\b/i, "conocimiento"],
         [/\b(?:razonamiento|probabilidad|bayes)\b/i, "razonamiento"],
         [/\b(?:planificación|planificacion|planning)\b/i, "planificación"],
-        [/\b(?:aprendizaje|learning|machine learning)\b/i, "aprendizaje"],
-        [/\b(?:redes neuronales|deep learning)\b/i, "redes neuronales"],
+        [/\b(?:aprendizaje|learning|machine learning|neurona|redes)\b/i, "aprendizaje redes neuronales"],
         [/\b(?:procesamiento del lenguaje|pln|nlp)\b/i, "lenguaje natural"],
         [/\b(?:visión|vision|percepción)\b/i, "visión"],
         [/\b(?:robótica|robotica|robotics)\b/i, "robótica"],
     ];
     for (const [pattern, keyword] of topicKeywords) {
-        if (pattern.test(message)) keywords.push(keyword);
+        if (pattern.test(cleanQuery)) keywords.push(keyword);
     }
 
-    return keywords.length > 0 ? keywords.join(" ") : message;
+    return keywords.length > 0 ? keywords.join(" ") : cleanQuery;
 }
 
 function extractPageNumbers(message: string): number[] {
     const pages: number[] = [];
-    const regex = /\b(?:pages?|p[aá]ginas?|p\.|pgs?\.?)\s*((?:\d+(?:\s*,\s*|\s+y\s+|\s+e\s+|\s+and\s+|\s+-\s+|)*)+)/gi;
+    // Acepta variantes con typos: pagina, pragina, pagna, pagia, pagian, etc.
+    const regex = /\b(?:pages?|p[r]?[aá]g(?:in[ao]|i|an)?s?|p\.?|pgs?\.?)\s*((?:\d+(?:\s*[,y]\s*|\s+e\s+|\s+and\s+|\s*-\s*)?)+)/gi;
     let m;
     while ((m = regex.exec(message)) !== null) {
         const numbers = m[1].match(/\d+/g);
-        if (numbers) {
-            numbers.forEach(n => pages.push(parseInt(n)));
-        }
+        if (numbers) numbers.forEach(n => pages.push(parseInt(n)));
+    }
+    // Fallback: si la query es tipo "que dice la [typo] 84" captura el numero solo
+    if (pages.length === 0) {
+        const fallback = message.match(/\b(?:p[r]?[aá]g(?:in[ao]|i|an)?s?|pagian|pagna|pagia|pragina|praginas)\s+(\d+)/i);
+        if (fallback) pages.push(parseInt(fallback[1]));
     }
     return [...new Set(pages)];
 }
@@ -287,7 +350,7 @@ async function fetchRelevantContext(
 ): Promise<{ contextText: string; ragContext: RagContext }> {
     const start = Date.now();
 
-    // 🚀 SALUDOS / CORTE SÍA: Saltar RAG y embeddings por completo (Latencia 0ms)
+    // SALUDOS / CORTESÍA: Saltar RAG y embeddings por completo
     if (isGreetingMessage(query)) {
         return {
             contextText: "",
@@ -295,58 +358,125 @@ async function fetchRelevantContext(
         };
     }
 
-    const pageNumbers = extractPageNumbers(query);
+    const normalized = normalizeUserQuery(query);
+    const pageNumbers = normalized.detectedPages.length > 0 ? normalized.detectedPages : extractPageNumbers(query);
+    const sectionTargeted = normalized.detectedSections.length > 0;
     const isMultiPage = pageNumbers.length > 1;
     const isPageTargeted = pageNumbers.length > 0;
-    const unitFilter = isPageTargeted ? null : extractUnitNumber(query);
+    const unitFilter = isPageTargeted || sectionTargeted ? null : extractUnitNumber(query);
 
     const matchCount = questionType === "page" ? CONFIG.rag.matchCountPage
         : questionType === "complex" ? CONFIG.rag.matchCountExtended
             : CONFIG.rag.matchCountDefault;
 
-    const matchThreshold = questionType === "page" || isMultiPage ? 0.08 : CONFIG.rag.matchThreshold;
+    const matchThreshold = questionType === "page" || isMultiPage ? 0.05 : CONFIG.rag.matchThreshold;
     const queryMode: RagContext["queryMode"] = isPageTargeted ? "page" : unitFilter ? "unit" : "hybrid";
     const supabase = getSupabaseClient();
 
     let allFragments: KnowledgeFragment[] = [];
 
-    if (isPageTargeted) {
-        // 🚀 BÚSQUEDA DIRECTA Y ULTRA RÁPIDA DE PÁGINA (JSONB exacto en Supabase)
-        const promises = pageNumbers.map(async pageNum => {
+    // BÚSQUEDA DIRECTA POR SECCIÓN (ej. 10.5, 10.7)
+    if (sectionTargeted) {
+        const secPromises = normalized.detectedSections.map(async secNum => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const { data, error } = await (supabase.from as any)("knowledge_embeddings")
                 .select("content, metadata")
-                .contains("metadata", { pageNumber: pageNum })
+                .contains("metadata", { section: secNum })
                 .limit(matchCount);
 
-            if (error || !data || data.length === 0) {
-                const fallback = await (supabase.from as any)("knowledge_embeddings")
-                    .select("content, metadata")
-                    .contains("metadata", { startPage: pageNum })
-                    .limit(matchCount);
-                return (fallback.data ?? []).map((row: any) => ({
+            if (!error && data && data.length > 0) {
+                return data.map((row: { content: string; metadata?: KnowledgeFragment['metadata'] }) => ({
                     content: row.content,
                     similarity: 1.0,
                     metadata: row.metadata,
                 }));
             }
 
-            return data.map((row: any) => ({
-                content: row.content,
-                similarity: 1.0,
-                metadata: row.metadata,
-            }));
+            // Fallback: Buscar en el arreglo de secciones
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const { data: arrayData } = await (supabase.from as any)("knowledge_embeddings")
+                .select("content, metadata")
+                .contains("metadata", { sections: [secNum] })
+                .limit(matchCount);
+
+            if (arrayData && arrayData.length > 0) {
+                return arrayData.map((row: { content: string; metadata?: KnowledgeFragment['metadata'] }) => ({
+                    content: row.content,
+                    similarity: 1.0,
+                    metadata: row.metadata,
+                }));
+            }
+
+            return [];
+        });
+
+        const secResults = await Promise.all(secPromises);
+        for (const fragments of secResults) {
+            allFragments.push(...fragments);
+        }
+    }
+
+    // BÚSQUEDA DIRECTA POR PÁGINA IMPRESA O NÚMERO DE PÁGINA
+    if (isPageTargeted && allFragments.length === 0) {
+        const promises = pageNumbers.map(async pageNum => {
+            // 1. Buscar por printedPage (página impresa real del libro ej: 391)
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const printedRes = await (supabase.from as any)("knowledge_embeddings")
+                .select("content, metadata")
+                .contains("metadata", { printedPage: pageNum })
+                .limit(matchCount);
+
+            if (printedRes.data && printedRes.data.length > 0) {
+                return printedRes.data.map((row: { content: string; metadata?: KnowledgeFragment['metadata'] }) => ({
+                    content: row.content,
+                    similarity: 1.0,
+                    metadata: row.metadata,
+                }));
+            }
+
+            // 2. Buscar por pageNumber (número de página del PDF)
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const { data, error } = await (supabase.from as any)("knowledge_embeddings")
+                .select("content, metadata")
+                .contains("metadata", { pageNumber: pageNum })
+                .limit(matchCount);
+
+            if (!error && data && data.length > 0) {
+                return data.map((row: { content: string; metadata?: KnowledgeFragment['metadata'] }) => ({
+                    content: row.content,
+                    similarity: 1.0,
+                    metadata: row.metadata,
+                }));
+            }
+
+            // 3. Fallback por startPage
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const fallbackStart = await (supabase.from as any)("knowledge_embeddings")
+                .select("content, metadata")
+                .contains("metadata", { startPage: pageNum })
+                .limit(matchCount);
+
+            if (fallbackStart.data && fallbackStart.data.length > 0) {
+                return fallbackStart.data.map((row: { content: string; similarity?: number; metadata?: KnowledgeFragment['metadata'] }) => ({
+                    content: row.content,
+                    similarity: 1.0,
+                    metadata: row.metadata,
+                }));
+            }
+
+            return [];
         });
 
         const results = await Promise.all(promises);
         for (const fragments of results) {
             allFragments.push(...fragments);
         }
-    } else {
+    } else if (allFragments.length === 0) {
         const ftsKeywords = extractStructuralKeywords(query);
 
-        // 🚀 LLAMADA ULTRA-RÁPIDA A LA EDGE FUNCTION DE SUPABASE
+        // LLAMADA A LA EDGE FUNCTION DE SUPABASE
         const edgeFunctionUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/embed-query`;
-        const edgeFunctionKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // Usado como Auth Token
+        const edgeFunctionKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
         
         const response = await fetch(edgeFunctionUrl, {
             method: 'POST',
@@ -355,7 +485,7 @@ async function fetchRelevantContext(
                 'Authorization': `Bearer ${edgeFunctionKey}`,
             },
             body: JSON.stringify({
-                query,
+                query: normalized.cleanQuery,
                 matchCount,
                 matchThreshold,
                 ftsKeywords,
@@ -364,13 +494,10 @@ async function fetchRelevantContext(
             }),
         });
 
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`Edge Function error: ${response.status} ${errText}`);
+        if (response.ok) {
+            const { data } = await response.json();
+            allFragments = data ?? [];
         }
-
-        const { data } = await response.json();
-        allFragments = data ?? [];
     }
 
     log("info", "RAG", `Búsqueda en ${Date.now() - start}ms`, {
@@ -410,86 +537,43 @@ async function fetchRelevantContext(
     return { contextText, ragContext };
 }
 
-// ============================================================
-// SYSTEM PROMPT
+
+
 // ============================================================
 function buildSystemPrompt(
     contextText: string,
-    lang: "es" | "en" | "auto",
-    questionType: QuestionType
+    lang: "es" | "en" | "auto"
 ): string {
-    const langInstruction = {
-        es: "SIEMPRE responde en español, independientemente del idioma del contenido del libro.",
-        en: "ALWAYS respond in English, regardless of the language used in the book content.",
-        auto: "Detecta el idioma de la pregunta del usuario y responde en ese mismo idioma.",
-    }[lang];
+    const langLine = lang === "es"
+        ? "Responde SIEMPRE en español."
+        : lang === "en"
+            ? "ALWAYS respond in English."
+            : "Responde en el mismo idioma que use el usuario.";
 
-    // ── Instrucciones adaptativas por tipo de pregunta ──
-    const lengthInstruction = questionType === "page"
-        ? `FORMATO DE RESPUESTA — CONSULTA DE PÁGINA(S):
-- Si preguntan por UNA página concreta: Extrae y presenta TODO el contenido de esa página, organizado en secciones claras.
-- Cita las páginas con el formato [Página X].`
-        : questionType === "complex"
-            ? `FORMATO DE RESPUESTA — CONSULTA COMPLEJA:
-- Estructura la respuesta con encabezados Markdown claros (##, ###).
-- Incluye pseudocódigo o fórmulas si aplican al tema.`
-            : `FORMATO DE RESPUESTA — CONSULTA SIMPLE / SALUDO:
-- Si el usuario está saludando ("hola", "buenas noches", etc.), responde con un saludo amable y breve como ARIA e invítalo a preguntar sobre el libro.
-- Si es una pregunta breve sobre IA, responde directo al grano (3-6 líneas).`;
-
-    // ── Contexto del libro recuperado por RAG ──
     const bookContext = contextText.length > 0
-        ? `\n\n╔══════════════════════════════════════════════════════════════╗
-║  FRAGMENTOS RECUPERADOS DEL LIBRO (fuente autoritativa)     ║
-╚══════════════════════════════════════════════════════════════╝
-${contextText}
-══════════════════════════════════════════════════════════════
+        ? `\n\n--- FRAGMENTOS RECUPERADOS DEL LIBRO DE RUSSELL & NORVIG ---\n${contextText}\n--- FIN DE FRAGMENTOS ---\n\nINSTRUCCIÓN: Usa los fragmentos anteriores como tu referencia principal de datos. Cita páginas inline con [Página X].`
+        : "\n\n(No hay fragmentos específicos adjuntos a esta consulta inmediata).";
 
-INSTRUCCIÓN CRÍTICA: Tu respuesta DEBE basarse en los fragmentos anteriores cuando contengan la información. Cita las páginas con [Página X].`
-        : `\n\n(Nota: No hay fragmentos de texto adjuntos para esta consulta. Si el usuario está saludando, presentándose o preguntando en general sobre el libro de IA, responde amablemente preséntandote como ARIA e invitándolo a realizar consultas del libro).`;
+    return `Eres ARIA, la Asistente de Referencia en Inteligencia Artificial especializada de élite en el libro "Inteligencia Artificial: Un Enfoque Moderno" (2ª Edición) de Stuart J. Russell & Peter Norvig.
 
-    // ── SYSTEM PROMPT PRINCIPAL ──
-    return `Eres **ARIA** (Asistente de Referencia en Inteligencia Artificial), un asistente académico de élite especializado EXCLUSIVAMENTE en el libro:
+${langLine}
 
-📖 **"Inteligencia Artificial: Un Enfoque Moderno" (2ª Edición)**
-✍️ Autores: Stuart J. Russell & Peter Norvig
+COBERTURA DE LA BASE DE DATOS:
+- Tu sistema cuenta con la TOTALIDAD del libro 'Inteligencia Artificial: Un Enfoque Moderno' (2ª Edición, 27 capítulos, 1,220 páginas) indexado y disponible en la base de datos de Supabase.
+- Si el usuario pregunta si el libro está completo, hasta qué página tienes acceso o si tienes todo el texto, confirma con absoluta seguridad que la totalidad de las 1,220 páginas del libro está registrada en el sistema. NUNCA digas que solo tienes acceso a unos pocos fragmentos.
 
-═══════════════════════════════════════════
-🌐 IDIOMA
-═══════════════════════════════════════════
-${langInstruction}
-
-═══════════════════════════════════════════
-🔒 RESTRICCIÓN DE TEMA
-═══════════════════════════════════════════
-- Tu dominio principal es la Inteligencia Artificial del libro de Russell & Norvig.
-- PERMITE saludos amables de cortesía, presentaciones y preguntas sobre los temas del libro.
-- SOLO si el usuario pregunta algo TOTALMENTE AJENO a la Inteligencia Artificial (recetas de cocina, deportes, política, películas), responde EXACTAMENTE:
-  "❌ Lo siento, solo puedo ayudarte con temas del libro *Inteligencia Artificial: Un Enfoque Moderno* de Russell & Norvig. ¿Tienes alguna duda sobre IA?"
-
-═══════════════════════════════════════════
-🧠 TU ROL Y EXPERTISE
-═══════════════════════════════════════════
-Eres un experto en IA con conocimiento enciclopédico de los 27 capítulos del libro. Si te saludan ("hola", "buenas noches"), saluda cordialmente, preséntate brevemente como ARIA y menciona que estás listo para responder cualquier duda sobre los temas o capítulos del libro de Russell & Norvig.
-
-═══════════════════════════════════════════
-📋 ${lengthInstruction}
-═══════════════════════════════════════════
-═══════════════════════════════════════════
-⚖️ REGLAS DE INTEGRIDAD
-═══════════════════════════════════════════
-1. **Citación obligatoria**: Cuando el contenido provenga del libro, cita la página exacta [Página X].
-2. **Transparencia**: Si algo NO está en los fragmentos recuperados, dilo explícitamente en una línea.
-3. **Anti-alucinación estricta**: NUNCA inventes datos, cifras, nombres de algoritmos, teoremas o resultados que no estén en el fragmento recuperado. Si no tienes la información, di "No tengo ese dato específico del libro".
-4. **Pseudocódigo fiel**: Si el libro presenta pseudocódigo de un algoritmo, reprodúcelo fielmente. No lo modifiques ni "mejores".
-5. **Notación matemática**: Usa notación clara y consistente con la del libro.
-6. **Formato profesional**: Usa Markdown (encabezados, viñetas, código, negrita) para que la respuesta sea visualmente clara y fácil de estudiar.
-7. **Sin redundancia**: No repitas la pregunta del usuario ni agregues introducciones genéricas. Ve directo al grano.
-8. **Navegación**: Cuando sea útil, indica al usuario "Para profundizar, revisa el Capítulo X, sección Y (página Z)" para que pueda ir directamente a la fuente.
-${bookContext}`;
+FORMATO Y ESTILO DE RESPUESTA (ESTILO CHATGPT):
+1. Organiza las respuestas de manera muy visual, estructurada y limpia utilizando Markdown.
+2. Usa un encabezado principal claro con ## para el tema.
+3. Utiliza etiquetas en negrita con salto de línea para organizar la información:
+   - **Concepto:** (Explicación clara y elegante)
+   - **Características:** (Lista con viñetas)
+   - **Ejemplo / Aplicación:** (Caso práctico del libro)
+4. Agrega un salto de línea limpio entre cada bloque para que la lectura sea cómoda.
+5. Al final de la respuesta, si usas información del libro, añade siempre el bloque de fuente:
+► **FUENTE**: *Inteligencia Artificial: Un Enfoque Moderno* - Capítulo [N] - Página(s) [X]${bookContext}`;
 }
 
-// ============================================================
 // VALIDACIÓN
 // ============================================================
 function validateBody(body: unknown): { valid: true; data: RequestBody } | { valid: false; error: string } {
@@ -587,6 +671,7 @@ export async function GET(request: Request) {
 
     try {
         const supabase = getSupabaseClient();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { data, error } = await (supabase.from as any)("chat_messages")
             .select("role, content, created_at")
             .eq("teacher_id", teacherId)
@@ -595,7 +680,7 @@ export async function GET(request: Request) {
 
         if (error) throw error;
 
-        const messages = (data ?? []).map((m: any) => ({
+        const messages = (data ?? []).map((m: { role: string; content: string; created_at: string }) => ({
             ...m,
             role: m.role === "teacher" ? "user" : m.role,
         }));
@@ -682,32 +767,52 @@ export async function POST(request: Request) {
             : "No se pudo obtener contexto del libro", ragError);
     }
 
-    // ← CAMBIO: pasar questionType al buildSystemPrompt
-    const systemPrompt = buildSystemPrompt(contextText, lang, questionType);
+    const systemPrompt = buildSystemPrompt(contextText, lang);
 
     const trimmedHistory: ChatMessage[] = (historyContext ?? [])
         .slice(-CONFIG.limits.maxHistoryMessages)
         .map(({ role, content }) => ({ role, content }));
 
-    const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
-        { role: "system", content: systemPrompt },
-        ...trimmedHistory,
-        { role: "user", content: message },
-    ];
-
     try {
         const groq = new Groq({ apiKey });
 
-        const stream = await groq.chat.completions.create({
-            messages,
-            model: CONFIG.model,
-            temperature: questionType === "complex" ? 0.4 : 0.2,
-            // ← CAMBIO: páginas necesitan más tokens para listar todo el contenido
-            max_tokens: questionType === "page" ? 3000
-                : questionType === "complex" ? 2048
-                    : 1024,
-            stream: true,
-        });
+        const messagesForGroq: Parameters<typeof groq.chat.completions.create>[0]['messages'] = [
+            { role: "system", content: systemPrompt },
+            ...trimmedHistory,
+            { role: "user", content: message },
+        ];
+
+        // Model Fallback Pipeline para tolerancia a fallos por cuotas/rate limits de Groq
+        const fallbackModels = [
+            CONFIG.model, // "llama-3.3-70b-versatile"
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+        ];
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let groqStream: any = null;
+        let selectedModelUsed: string = CONFIG.model;
+
+        for (const targetModel of fallbackModels) {
+            try {
+                groqStream = await groq.chat.completions.create({
+                    messages: messagesForGroq,
+                    model: targetModel,
+                    temperature: questionType === "complex" ? 0.4 : 0.2,
+                    max_tokens: questionType === "page" ? 3000 : questionType === "complex" ? 2048 : 1024,
+                    stream: true,
+                });
+                selectedModelUsed = targetModel;
+                break; // Éxito con este modelo
+            } catch (modelErr) {
+                const isRateLimit = modelErr instanceof Error && (modelErr.message.includes("rate_limit") || modelErr.message.includes("429"));
+                log("warn", "GroqFallback", `Fallo en modelo ${targetModel} (${isRateLimit ? "Rate Limit" : "Error"}), probando fallback...`);
+            }
+        }
+
+        if (!groqStream) {
+            throw new Error("Todos los modelos de Groq alcanzaron el límite de tasa. Intenta en un momento.");
+        }
 
         const encoder = new TextEncoder();
         let fullReply = "";
@@ -715,7 +820,7 @@ export async function POST(request: Request) {
         const readableStream = new ReadableStream({
             async start(controller) {
                 try {
-                    for await (const chunk of stream) {
+                    for await (const chunk of groqStream) {
                         const text = chunk.choices[0]?.delta?.content ?? "";
                         if (text) {
                             fullReply += text;
@@ -728,7 +833,8 @@ export async function POST(request: Request) {
 
                     const elapsed = Date.now() - requestStart;
                     recordLatency(elapsed);
-                    log("info", "Groq", `Stream completado en ${elapsed}ms`, {
+                    log("info", "Groq", `Stream completado en ${elapsed}ms con modelo ${selectedModelUsed}`, {
+                        model: selectedModelUsed,
                         questionType,
                         lang,
                         contextFragments: ragContext.totalFragments,
@@ -787,6 +893,7 @@ async function saveChatMessages(
 ) {
     try {
         const supabase = getSupabaseClient();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (supabase.from as any)("chat_messages").insert([
             { teacher_id: teacherId, role: "teacher", content: userMsg, rag_context: null },
             { teacher_id: teacherId, role: "assistant", content: assistantMsg, rag_context: ragContext },

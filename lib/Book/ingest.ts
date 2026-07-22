@@ -10,8 +10,8 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 // ─────────────────────────────────────────────
 const CONFIG = {
   START_PAGE: 5,     // Página real del PDF donde comienza el contenido útil (solicitado desde hoja 5)
-  CHUNK_SIZE: 200,   // Palabras por fragmento
-  CHUNK_OVERLAP: 30,    // Palabras de solapamiento entre fragmentos para no perder contexto
+  CHUNK_SIZE: 500,   // ↑ Aumentado de 200 → 500 palabras para más contexto por fragmento
+  CHUNK_OVERLAP: 80,    // ↑ Aumentado de 30 → 80 palabras de solapamiento para no perder contexto entre fragmentos
   MIN_CHUNK_CHARS: 80,    // Mínimo de caracteres para considerar un chunk válido
   MAX_NOISE_RATIO: 0.15,  // Si más del 15% son símbolos raros → fragmento corrupto, se descarta
   BATCH_SIZE: 20,    // Fragmentos que se insertan en Supabase por llamada
@@ -28,7 +28,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
-  console.error('❌ Error: Falta NEXT_PUBLIC_SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en el .env');
+  console.error(' Error: Falta NEXT_PUBLIC_SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en el .env');
   process.exit(1);
 }
 
@@ -42,12 +42,12 @@ const files = fs.readdirSync(BOOK_DIR);
 const pdfFileName = files.find(f => f.toLowerCase().endsWith('.pdf'));
 
 if (!pdfFileName) {
-  console.error('❌ No se encontró ningún archivo .pdf en la carpeta lib/Book.');
+  console.error(' No se encontró ningún archivo .pdf en la carpeta lib/Book.');
   process.exit(1);
 }
 
 const PDF_PATH = path.join(BOOK_DIR, pdfFileName);
-console.log(`📄 Archivo PDF detectado: ${pdfFileName}`);
+console.log(` Archivo PDF detectado: ${pdfFileName}`);
 
 // ─────────────────────────────────────────────
 //  LIMPIEZA DE TEXTO
@@ -55,17 +55,17 @@ console.log(`📄 Archivo PDF detectado: ${pdfFileName}`);
 // ─────────────────────────────────────────────
 function cleanText(raw: string): string {
   return raw
-    // Normaliza saltos de línea múltiples
+    // Normaliza saltos de línea de Windows
     .replace(/\r\n/g, '\n')
-    // Elimina líneas que son solo símbolos/basura (bullets decorativos del libro)
-    .replace(/^[\s~•\-_\/\\|'`.,:;!@#$%^&*()]+$/gm, '')
+    // Elimina líneas que son SOLO símbolos decorativos/basura (bullets del libro)
+    // NOTA: No eliminamos líneas que contengan letras o números
+    .replace(/^[\s~•\-_\/\\|'`.,:;!@#$%^&*()]{3,}$/gm, '')
     // Colapsa espacios internos múltiples
     .replace(/[ \t]{2,}/g, ' ')
-    // Une palabras partidas por guión al final de línea (OCR muy común)
+    // Une palabras partidas por guión al final de línea (OCR muy común en PDFs)
     .replace(/(\w)-\n(\w)/g, '$1$2')
-    // Elimina espacios dentro de palabras causados por OCR (ej: "contin u ou s" → "continuous")
-    .replace(/\b(\w) (\w) (\w)\b/g, '$1$2$3')
-    .replace(/\b(\w) (\w)\b/g, '$1$2')
+    // ELIMINADO: Las regex /\b(\w) (\w)\b/g que unían letras individuales destruían
+    // abreviaturas técnicas válidas ("A *", "O(n)", siglas como "I A", etc.)
     // Colapsa líneas vacías múltiples en máximo dos
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -112,10 +112,10 @@ async function extractTextFromPDF(filePath: string): Promise<PageData[]> {
   const numPages = pdf.numPages;
 
   console.log(`   PDF cargado: ${numPages} páginas totales.`);
-  console.log(`   ⏭️  Saltando páginas 1–${CONFIG.START_PAGE - 1} (índice/prefacio).`);
-  console.log(`   📖 Extrayendo desde la página ${CONFIG.START_PAGE}...\n`);
+  console.log(`     Saltando páginas 1–${CONFIG.START_PAGE - 1} (índice/prefacio).`);
+  console.log(`    Extrayendo desde la página ${CONFIG.START_PAGE}...\n`);
 
-  let pagesData: PageData[] = [];
+  const pagesData: PageData[] = [];
   let errorCount = 0;
   let skippedPages = 0;
 
@@ -125,7 +125,7 @@ async function extractTextFromPDF(filePath: string): Promise<PageData[]> {
       const textContent = await page.getTextContent();
 
       const pageText = textContent.items
-        .map((item: any) => item.str || '')
+        .map((item: { str?: string }) => item.str || '')
         .join(' ');
 
       // Si la página entera parece corrupta, la omitimos
@@ -139,7 +139,7 @@ async function extractTextFromPDF(filePath: string): Promise<PageData[]> {
     } catch (pageError) {
       errorCount++;
       if (errorCount <= 5) {
-        console.warn(`   ⚠️ Página ${pageNum} con error: ${(pageError as Error).message?.slice(0, 60)}`);
+        console.warn(`    Página ${pageNum} con error: ${(pageError as Error).message?.slice(0, 60)}`);
       }
     }
 
@@ -148,7 +148,7 @@ async function extractTextFromPDF(filePath: string): Promise<PageData[]> {
     }
   }
 
-  console.log(`\n   ✅ Extracción completa.`);
+  console.log(`\n    Extracción completa.`);
   console.log(`      - Páginas con error:    ${errorCount}`);
   console.log(`      - Páginas corruptas omitidas: ${skippedPages}`);
 
@@ -219,7 +219,7 @@ async function checkForDuplicates(source: string): Promise<boolean> {
     .limit(1);
 
   if (error) {
-    console.warn('   ⚠️ No se pudo verificar duplicados:', error.message);
+    console.warn('    No se pudo verificar duplicados:', error.message);
     return false;
   }
 
@@ -252,7 +252,7 @@ async function insertBatch(rows: object[], maxRetries = 3): Promise<void> {
     if (attempt === maxRetries) {
       throw new Error(`Error al insertar lote después de ${maxRetries} intentos: ${error.message}`);
     }
-    console.warn(`   ⚠️ Reintento ${attempt}/${maxRetries} por error: ${error.message}`);
+    console.warn(`    Reintento ${attempt}/${maxRetries} por error: ${error.message}`);
     await new Promise(r => setTimeout(r, 1000 * attempt)); // backoff
   }
 }
@@ -269,7 +269,7 @@ async function main() {
   console.log(`1. Cargando modelo de embeddings: ${CONFIG.MODEL}`);
   console.log('   (Primera vez puede tardar ~2 minutos descargando el modelo)\n');
   const extractor = await pipeline('feature-extraction', CONFIG.MODEL);
-  console.log('   ✅ Modelo listo.\n');
+  console.log('    Modelo listo.\n');
 
   // 2. Verificar PDF
   if (!fs.existsSync(PDF_PATH)) {
@@ -281,12 +281,12 @@ async function main() {
   const alreadyExists = await checkForDuplicates(pdfFileName);
 
   if (alreadyExists) {
-    console.log(`   ⚠️  Se encontraron registros previos de "${pdfFileName}".`);
-    console.log('   🗑️  Borrando registros anteriores para evitar duplicados...');
+    console.log(`     Se encontraron registros previos de "${pdfFileName}".`);
+    console.log('     Borrando registros anteriores para evitar duplicados...');
     await deletePreviousRecords(pdfFileName);
-    console.log('   ✅ Registros anteriores eliminados.\n');
+    console.log('    Registros anteriores eliminados.\n');
   } else {
-    console.log('   ✅ Sin duplicados. Continuando...\n');
+    console.log('    Sin duplicados. Continuando...\n');
   }
 
   // 4. Extraer texto
@@ -295,23 +295,40 @@ async function main() {
 
   const totalChars = pagesData.reduce((acc, p) => acc + p.text.length, 0);
   if (totalChars < 500) {
-    console.error('\n❌ Se extrajo muy poco texto. El PDF puede estar severamente dañado.');
+    console.error('\n Se extrajo muy poco texto. El PDF puede estar severamente dañado.');
     process.exit(1);
   }
-  console.log(`   ✅ Texto limpio listo: ${totalChars.toLocaleString()} caracteres en ${pagesData.length} páginas.\n`);
+  console.log(`    Texto limpio listo: ${totalChars.toLocaleString()} caracteres en ${pagesData.length} páginas.\n`);
 
   // 5. Chunkear
-  console.log('4. Dividiendo en fragmentos con overlap (preservando páginas)...');
+  console.log('4. Dividiendo en fragmentos con overlap (preservando páginas y secciones)...');
   const rawChunks = chunkTextWithOverlap(pagesData);
 
-  // Filtrar chunks cortos o corruptos y añadir el CONTEXTO DE CAPÍTULO/UNIDAD
+  // Filtrar chunks cortos o corruptos y añadir CONTEXTO DE CAPÍTULO, SECCIÓN Y PÁGINA IMPRESA
   let currentUnitContext = "General / Intro";
+  let currentSectionContext = "";
+  let currentPrintedPage = 1;
+
   const chunks = rawChunks
     .filter(c => {
       const trimmed = c.text.trim();
       return trimmed.length >= CONFIG.MIN_CHUNK_CHARS && !isCorrupted(trimmed);
     })
     .map(c => {
+      // DETECCIÓN DE PÁGINA IMPRESA REAL (ej. encabezado/pie de página)
+      const pageHeaderMatch = c.text.match(/\b([1-9]\d{1,3})\s+(?:INTEGLENCIA|INTELIGENCIA|REPRESENTACIÓN|REPRESENTACION|BÚSQUEDA|BUSQUEDA|CAPÍTULO|CAPITULO)\b/i)
+        || c.text.match(/\b(?:INTEGLENCIA|INTELIGENCIA|REPRESENTACIÓN|REPRESENTACION|BÚSQUEDA|BUSQUEDA)\b.{0,30}\b([1-9]\d{1,3})\b/i);
+      
+      if (pageHeaderMatch) {
+        const pNum = parseInt(pageHeaderMatch[1]);
+        if (pNum >= 1 && pNum <= 1300) {
+          currentPrintedPage = pNum;
+        }
+      } else {
+        // Estimación aproximada si no hay encabezado explícito (PDF suele tener ~25 páginas de índice/prefacio)
+        currentPrintedPage = Math.max(1, c.pageNum - 25);
+      }
+
       // DETECCIÓN DE CAPÍTULO O UNIDAD
       const chapterMatch = c.text.match(/\b(CAPÍTULO|Capítulo|Capitulo|CHAPTER|Chapter|UNIDAD|Unidad|UNIT|Unit)\s+(\d{1,2})\b/);
       if (chapterMatch) {
@@ -320,22 +337,37 @@ async function main() {
           currentUnitContext = `Capítulo ${num}`;
         }
       }
+
+      // DETECCIÓN DE SECCIONES EXACTAS (ej: 10.1, 10.2, 10.5, 10.7)
+      const sectionMatches = c.text.match(/\b(\d{1,2}\.\d{1,2})\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ\s,:-]{3,50})/g);
+      const sectionsFound: string[] = [];
+      if (sectionMatches) {
+        for (const sm of sectionMatches) {
+          const secNum = sm.match(/\d{1,2}\.\d{1,2}/)?.[0];
+          if (secNum && !sectionsFound.includes(secNum)) {
+            sectionsFound.push(secNum);
+            currentSectionContext = secNum;
+          }
+        }
+      }
       
       // Detectar temas de Inteligencia Artificial en el fragmento
       const topics = detectTopics(c.text);
 
-      // FIX: Separar "PageNum" de "Unit" para que FTS no confunda "page 11" con "unit 11"
       return {
-        text: `[Unit: ${currentUnitContext}] [PageNum: ${c.pageNum}] ${c.text.trim()}`,
+        text: `[Unit: ${currentUnitContext}] [Section: ${currentSectionContext || 'N/A'}] [PrintedPage: ${currentPrintedPage}] [PageNum: ${c.pageNum}] ${c.text.trim()}`,
         pageNum: c.pageNum,
+        printedPage: currentPrintedPage,
         unit: currentUnitContext,
+        sections: sectionsFound,
+        currentSection: currentSectionContext,
         topics
       };
     });
 
-  console.log(`   ✅ Fragmentos generados: ${rawChunks.length}`);
-  console.log(`   ✅ Fragmentos válidos (limpios): ${chunks.length}`);
-  console.log(`   🗑️  Fragmentos descartados (corruptos/cortos): ${rawChunks.length - chunks.length}\n`);
+  console.log(`    Fragmentos generados: ${rawChunks.length}`);
+  console.log(`    Fragmentos válidos (limpios): ${chunks.length}`);
+  console.log(`     Fragmentos descartados (corruptos/cortos): ${rawChunks.length - chunks.length}\n`);
 
   // 6. Generar embeddings e insertar en lotes
   console.log('5. Generando embeddings e insertando en Supabase...\n');
@@ -358,7 +390,10 @@ async function main() {
         source: pdfFileName,
         chunkIndex: i,
         pageNumber: chunk.pageNum,
+        printedPage: chunk.printedPage,
         unit: chunk.unit,
+        section: chunk.currentSection,
+        sections: chunk.sections,
         topics: chunk.topics
       },
     });
@@ -391,7 +426,7 @@ async function main() {
   // 8. Resumen final
   const totalTime = Math.round((Date.now() - startTime) / 1000);
   console.log(`\n==========================================`);
-  console.log(`✅ INGESTIÓN COMPLETADA`);
+  console.log(` INGESTIÓN COMPLETADA`);
   console.log(`==========================================`);
   console.log(`   Archivo:             ${pdfFileName}`);
   console.log(`   Página de inicio:    ${CONFIG.START_PAGE}`);
@@ -401,14 +436,14 @@ async function main() {
   console.log(`   Tiempo total:        ${totalTime}s`);
 
   if (count && count >= successCount) {
-    console.log(`\n🎉 ¡Verificación exitosa! Todos los fragmentos están en Supabase.`);
+    console.log(`\n ¡Verificación exitosa! Todos los fragmentos están en Supabase.`);
   } else {
-    console.warn(`\n⚠️ Posible discrepancia: se enviaron ${successCount} pero la DB reporta ${count}.`);
+    console.warn(`\n Posible discrepancia: se enviaron ${successCount} pero la DB reporta ${count}.`);
   }
 }
 
 main().catch(err => {
-  console.error('\n💀 Error fatal:');
+  console.error('\n Error fatal:');
   console.error(err);
   process.exit(1);
 });
