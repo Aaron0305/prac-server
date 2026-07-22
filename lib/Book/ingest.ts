@@ -9,13 +9,13 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 //  CONFIGURACIÓN CENTRAL — ajusta aquí sin tocar la lógica
 // ─────────────────────────────────────────────
 const CONFIG = {
-  START_PAGE: 5,     // Página real del PDF donde comienza el contenido útil (solicitado desde hoja 5)
-  CHUNK_SIZE: 500,   // ↑ Aumentado de 200 → 500 palabras para más contexto por fragmento
-  CHUNK_OVERLAP: 80,    // ↑ Aumentado de 30 → 80 palabras de solapamiento para no perder contexto entre fragmentos
-  MIN_CHUNK_CHARS: 80,    // Mínimo de caracteres para considerar un chunk válido
-  MAX_NOISE_RATIO: 0.15,  // Si más del 15% son símbolos raros → fragmento corrupto, se descarta
-  BATCH_SIZE: 20,    // Fragmentos que se insertan en Supabase por llamada
-  MODEL: 'Supabase/gte-small', // Modelo nativo de Supabase Edge Functions
+  START_PAGE: 29,    // Página 29/30 del PDF donde inicia el Capítulo 1 (Página impresa 1/2 del libro)
+  CHUNK_SIZE: 500,   // palabras por fragmento
+  CHUNK_OVERLAP: 80,    // palabras de solapamiento
+  MIN_CHUNK_CHARS: 80,    // Mínimo de caracteres por chunk
+  MAX_NOISE_RATIO: 0.15,  // Umbral de ruido
+  BATCH_SIZE: 20,    // Fragmentos por lote
+  MODEL: 'Supabase/gte-small', // Modelo nativo
   TABLE: 'knowledge_embeddings',
 };
 
@@ -315,18 +315,22 @@ async function main() {
       return trimmed.length >= CONFIG.MIN_CHUNK_CHARS && !isCorrupted(trimmed);
     })
     .map(c => {
-      // DETECCIÓN DE PÁGINA IMPRESA REAL (ej. encabezado/pie de página)
-      const pageHeaderMatch = c.text.match(/\b([1-9]\d{1,3})\s+(?:INTEGLENCIA|INTELIGENCIA|REPRESENTACIÓN|REPRESENTACION|BÚSQUEDA|BUSQUEDA|CAPÍTULO|CAPITULO)\b/i)
-        || c.text.match(/\b(?:INTEGLENCIA|INTELIGENCIA|REPRESENTACIÓN|REPRESENTACION|BÚSQUEDA|BUSQUEDA)\b.{0,30}\b([1-9]\d{1,3})\b/i);
+      // CÁLCULO DE PÁGINA IMPRESA REAL (OFFSET EXACTO DEL LIBRO)
+      // La página 29/30 del PDF corresponde a la página impresa 1/2 del libro (Offset de -28)
+      const calculatedPrintedPage = Math.max(1, c.pageNum - 28);
+      
+      const pageHeaderMatch = c.text.match(/\b([1-9]\d{0,3})\s+(?:INTEGLENCIA|INTELIGENCIA|REPRESENTACIÓN|REPRESENTACION|BÚSQUEDA|BUSQUEDA|CAPÍTULO|CAPITULO)\b/i)
+        || c.text.match(/\b(?:INTEGLENCIA|INTELIGENCIA|REPRESENTACIÓN|REPRESENTACION|BÚSQUEDA|BUSQUEDA)\b.{0,30}\b([1-9]\d{0,3})\b/i);
       
       if (pageHeaderMatch) {
         const pNum = parseInt(pageHeaderMatch[1]);
         if (pNum >= 1 && pNum <= 1300) {
           currentPrintedPage = pNum;
+        } else {
+          currentPrintedPage = calculatedPrintedPage;
         }
       } else {
-        // Estimación aproximada si no hay encabezado explícito (PDF suele tener ~25 páginas de índice/prefacio)
-        currentPrintedPage = Math.max(1, c.pageNum - 25);
+        currentPrintedPage = calculatedPrintedPage;
       }
 
       // DETECCIÓN DE CAPÍTULO O UNIDAD

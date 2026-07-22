@@ -558,8 +558,8 @@ function buildSystemPrompt(
             : "Responde en el mismo idioma que use el usuario.";
 
     const bookContext = contextText.length > 0
-        ? `\n\n--- FRAGMENTOS RECUPERADOS DEL LIBRO DE RUSSELL & NORVIG ---\n${contextText}\n--- FIN DE FRAGMENTOS ---\n\nINSTRUCCIÓN: Usa los fragmentos anteriores como tu referencia principal de datos. Cita páginas inline con [Página X].`
-        : "\n\n(No hay fragmentos específicos adjuntos a esta consulta inmediata).";
+        ? `\n\n--- FRAGMENTOS EXACTOS RECUPERADOS DEL LIBRO DE RUSSELL & NORVIG ---\n${contextText}\n--- FIN DE FRAGMENTOS ---\n\nINSTRUCCIÓN DE FIDELIDAD ESTRICTA:\n1. Basado ÚNICAMENTE en los fragmentos anteriores, explica el contenido exacto del libro.\n2. Si los fragmentos anteriores corresponden a páginas del índice o títulos de temas sin desarrollo de texto teórico extenso, indica explícitamente los temas que aparecen en esas páginas sin inventar teoría adicional que no esté escrita ahí.\n3. NUNCA agregues información externa fuera del texto recuperado.\n4. Cita las páginas impresas exactamente con [Página X].`
+        : "\n\n(No hay fragmentos específicos recuperados para esta consulta).";
 
     return `Eres ARIA, la Asistente de Referencia en Inteligencia Artificial especializada de élite en el libro "Inteligencia Artificial: Un Enfoque Moderno" (2ª Edición) de Stuart J. Russell & Peter Norvig.
 
