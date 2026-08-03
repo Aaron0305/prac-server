@@ -28,6 +28,7 @@ interface KnowledgeFragment {
         chunkIndex?: number;
         startPage?: number;
         pageNumber?: number;
+        printedPage?: number;
         unit?: string;
         topics?: string[];
     };
@@ -517,7 +518,7 @@ async function fetchRelevantContext(
         totalFragments: fragments.length,
         queryMode,
         fragments: fragments.map(f => ({
-            page: f.metadata?.pageNumber ?? f.metadata?.startPage,
+            page: f.metadata?.printedPage ?? f.metadata?.pageNumber ?? f.metadata?.startPage,
             unit: f.metadata?.unit,
             topics: f.metadata?.topics,
             similarity: Math.round(f.similarity * 1000) / 1000,
