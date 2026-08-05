@@ -877,12 +877,11 @@ export async function POST(request: Request) {
             { role: "user", content: message },
         ];
 
-        // Model Fallback Pipeline para tolerancia a fallos por cuotas/rate limits de Groq
+        // Pipeline de Resiliencia con Reintentos y Fallback para Groq
         const fallbackModels = [
             CONFIG.model, // "llama-3.3-70b-versatile"
             "llama-3.1-8b-instant",
             "llama3-70b-8192",
-            "llama3-8b-8192",
             "gemma2-9b-it",
         ];
 
@@ -890,23 +889,42 @@ export async function POST(request: Request) {
         let groqStream: any = null;
         let selectedModelUsed: string = CONFIG.model;
 
+        // Intentar primero con el modelo principal usando exponential backoff en caso de rate limit
         for (const targetModel of fallbackModels) {
-            try {
-                groqStream = await groq.chat.completions.create({
-                    messages: messagesForGroq,
-                    model: targetModel,
-                    temperature: questionType === "complex" ? 0.4 : 0.2,
-                    max_tokens: questionType === "page" ? 3000 : questionType === "complex" ? 2048 : 1024,
-                    stream: true,
-                });
-                selectedModelUsed = targetModel;
-                break; // Éxito con este modelo
-            } catch (modelErr) {
-                const isRateLimit = modelErr instanceof Error && (modelErr.message.includes("rate_limit") || modelErr.message.includes("429"));
-                log("warn", "GroqFallback", `Fallo en modelo ${targetModel} (${isRateLimit ? "Rate Limit" : "Error"}), probando fallback...`);
-                // Breve pausa de 200ms si es rate limit antes de probar el siguiente modelo
-                if (isRateLimit) await new Promise(res => setTimeout(res, 200));
+            let attempts = 0;
+            const maxAttemptsPerModel = targetModel === CONFIG.model ? 3 : 1;
+
+            while (attempts < maxAttemptsPerModel && !groqStream) {
+                try {
+                    attempts++;
+                    groqStream = await groq.chat.completions.create({
+                        messages: messagesForGroq,
+                        model: targetModel,
+                        temperature: questionType === "complex" ? 0.4 : 0.2,
+                        max_tokens: questionType === "page" ? 3000 : questionType === "complex" ? 2048 : 1024,
+                        stream: true,
+                    });
+                    selectedModelUsed = targetModel;
+                    break; // Éxito
+                } catch (modelErr) {
+                    const isRateLimit = modelErr instanceof Error && (
+                        modelErr.message.includes("rate_limit") || 
+                        modelErr.message.includes("429") ||
+                        modelErr.message.includes("TPM")
+                    );
+
+                    log("warn", "GroqFallback", `Fallo en modelo ${targetModel} (Intento ${attempts}/${maxAttemptsPerModel}, ${isRateLimit ? "Rate Limit/TPM" : "Error"})`);
+
+                    if (isRateLimit && attempts < maxAttemptsPerModel) {
+                        // Exponential backoff: 1.2s en intento 1, 2.5s en intento 2
+                        const backoffMs = attempts * 1250;
+                        log("info", "GroqFallback", `Pausa de ${backoffMs}ms por Rate Limit antes de reintentar...`);
+                        await new Promise(res => setTimeout(res, backoffMs));
+                    }
+                }
             }
+
+            if (groqStream) break; // Si tuvimos éxito con este modelo, salir del bucle de modelos
         }
 
         if (!groqStream) {
