@@ -191,6 +191,22 @@ function detectTopics(text: string): string[] {
   return found;
 }
 
+// ─────────────────────────────────────────────
+//  EXTRACCIÓN DE TÍTULO DE SECCIÓN DEL CHUNK
+//  Busca líneas que parecen encabezados (ej: "3.5 Búsqueda A*", "Capítulo 4")
+// ─────────────────────────────────────────────
+function extractSectionTitle(text: string): string | null {
+  // Patrón: número de sección + título (ej: "3.5 Funciones heurísticas")
+  const sectionMatch = text.match(/^\s*(\d{1,2}\.\d{1,2})\s+([A-ZÁÉÍÓÚÑ][^.\n]{3,60})/m);
+  if (sectionMatch) return `${sectionMatch[1]} ${sectionMatch[2].trim()}`;
+
+  // Patrón: Capítulo X. Título
+  const chapterMatch = text.match(/^\s*(?:Cap[ií]tulo|Chapter)\s+(\d{1,2})[.:]?\s+([A-ZÁÉÍÓÚÑ][^.\n]{3,80})/mi);
+  if (chapterMatch) return `Capítulo ${chapterMatch[1]}: ${chapterMatch[2].trim()}`;
+
+  return null;
+}
+
 function chunkTextWithOverlap(pages: PageData[]): ChunkData[] {
   const allChunks: ChunkData[] = [];
   for (const page of pages) {
@@ -318,12 +334,19 @@ async function main() {
       // CÁLCULO DE PÁGINA IMPRESA REAL (OFFSET EXACTO DE -28 RESPECTO AL PDF)
       const currentPrintedPage = Math.max(1, c.pageNum - 28);
       const topics = detectTopics(c.text);
+      const sectionTitle = extractSectionTitle(c.text);
+      const cleanText = c.text.trim();
 
       return {
-        text: `[Página del Libro: ${currentPrintedPage}] ${c.text.trim()}`,
+        // Texto LIMPIO para generar embedding (SIN prefijo de página)
+        // Esto evita contaminar el vector semántico con "Página del Libro: X"
+        cleanText,
+        // Texto con prefijo de página para almacenar en la columna content
+        displayText: `[Página del Libro: ${currentPrintedPage}] ${cleanText}`,
         pageNum: c.pageNum,
         printedPage: currentPrintedPage,
-        topics
+        topics,
+        sectionTitle
       };
     });
 
@@ -341,19 +364,21 @@ async function main() {
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
 
-    // Generar embedding
-    const output = await extractor(chunk.text, { pooling: 'mean', normalize: true });
+    // Generar embedding SOLO sobre el texto limpio (sin prefijo de página)
+    // Esto produce vectores semánticos puros que representan el contenido teórico real
+    const output = await extractor(chunk.cleanText, { pooling: 'mean', normalize: true });
     const embeddingArray = Array.from(output.data as Float32Array);
 
     batchBuffer.push({
-      content: chunk.text,
+      content: chunk.displayText,
       embedding: embeddingArray,
       metadata: {
         source: pdfFileName,
         chunkIndex: i,
         pageNumber: chunk.pageNum,
         printedPage: chunk.printedPage,
-        topics: chunk.topics
+        topics: chunk.topics,
+        sectionTitle: chunk.sectionTitle
       },
     });
 

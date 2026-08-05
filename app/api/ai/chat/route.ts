@@ -5,6 +5,7 @@ import Groq from "groq-sdk";
 import { createClient } from "@supabase/supabase-js";
 import { franc } from "franc";
 import { Redis } from "@upstash/redis";
+import { getQueryEmbedding } from "@/lib/embedding";
 
 // ============================================================
 // TIPOS
@@ -52,9 +53,9 @@ interface RagContext {
 const CONFIG = {
     model: "llama-3.3-70b-versatile",
     rag: {
-        matchThreshold: 0.08,
-        matchCountDefault: 8,
-        matchCountExtended: 12,
+        matchThreshold: 0.20,
+        matchCountDefault: 10,
+        matchCountExtended: 15,
         matchCountPage: 15,
     },
     limits: {
@@ -292,21 +293,64 @@ function extractStructuralKeywords(message: string): string {
     }
 
     const topicKeywords: [RegExp, string][] = [
-        [/\b(?:agente|agentes|agent)\b/i, "agentes"],
-        [/\b(?:búsqueda|busqueda|search|heurística|a\*)\b/i, "búsqueda"],
-        [/\b(?:conocimiento|lógica|logica|knowledge)\b/i, "conocimiento"],
-        [/\b(?:razonamiento|probabilidad|bayes)\b/i, "razonamiento"],
+        [/\b(?:agente|agentes|agent)\b/i, "agentes inteligentes"],
+        [/\b(?:búsqueda|busqueda|search|heurística|a\*)\b/i, "búsqueda heurística algoritmo"],
+        [/\b(?:conocimiento|lógica|logica|knowledge)\b/i, "conocimiento lógica representación"],
+        [/\b(?:razonamiento|probabilidad|bayes)\b/i, "razonamiento probabilístico bayesiano"],
         [/\b(?:planificación|planificacion|planning)\b/i, "planificación"],
-        [/\b(?:aprendizaje|learning|machine learning|neurona|redes)\b/i, "aprendizaje redes neuronales"],
-        [/\b(?:procesamiento del lenguaje|pln|nlp)\b/i, "lenguaje natural"],
-        [/\b(?:visión|vision|percepción)\b/i, "visión"],
+        [/\b(?:aprendizaje|learning|machine learning|neurona|redes)\b/i, "aprendizaje automático redes neuronales"],
+        [/\b(?:procesamiento del lenguaje|pln|nlp)\b/i, "procesamiento lenguaje natural"],
+        [/\b(?:visión|vision|percepción)\b/i, "visión percepción"],
         [/\b(?:robótica|robotica|robotics)\b/i, "robótica"],
+        [/\b(?:minimax|alpha.?beta|alfa.?beta|juegos?|adversarial)\b/i, "minimax alpha-beta juegos adversariales"],
+        [/\b(?:satisfacci[oó]n|restricciones?|csp|constraint)\b/i, "satisfacción restricciones CSP"],
+        [/\b(?:incertidumbre|probabilidad|utilidad)\b/i, "incertidumbre probabilidad utilidad"],
+        [/\b(?:entrop[ií]a|[áa]rbol(?:es)?\s*de\s*decisi[oó]n|decision\s*tree)\b/i, "árboles decisión entropía"],
     ];
     for (const [pattern, keyword] of topicKeywords) {
         if (pattern.test(cleanQuery)) keywords.push(keyword);
     }
 
+    // Si no se encontraron keywords temáticas, limpiar stop words de la consulta
+    // para generar un texto FTS de alta calidad
+    if (keywords.length === 0 || (keywords.length === detectedPages.length)) {
+        const ftsClean = removeStopWords(cleanQuery);
+        if (ftsClean.length > 0) keywords.push(ftsClean);
+    }
+
     return keywords.length > 0 ? keywords.join(" ") : cleanQuery;
+}
+
+// ============================================================
+// ELIMINACIÓN DE STOP WORDS PARA FTS DE ALTA CALIDAD
+// ============================================================
+const STOP_WORDS = new Set([
+    // Español
+    "que", "qué", "es", "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "de", "del", "en", "con", "por", "para", "como", "cómo", "al", "se",
+    "su", "sus", "me", "te", "le", "lo", "nos", "les", "mi", "tu",
+    "y", "o", "u", "e", "no", "si", "sí", "ya", "más", "mas",
+    "muy", "tan", "este", "esta", "estos", "estas", "ese", "esa",
+    "son", "ser", "está", "hay", "tiene", "puede", "fue", "era",
+    "sobre", "entre", "desde", "hasta", "pero", "sin", "según",
+    "dime", "explicame", "explícame", "explica", "dame", "muestra",
+    "háblame", "hablame", "describe", "cuéntame", "cuentame",
+    "quiero", "necesito", "puedes", "podrías", "podrias",
+    "favor", "acerca", "acerca de", "respecto", "respecto a",
+    // Inglés
+    "what", "is", "the", "a", "an", "of", "in", "on", "at", "to", "for",
+    "how", "does", "do", "can", "could", "would", "should", "will",
+    "it", "its", "this", "that", "these", "those", "and", "or", "but",
+    "with", "about", "from", "by", "are", "was", "were", "be", "been",
+    "tell", "me", "explain", "describe", "show", "give",
+]);
+
+function removeStopWords(text: string): string {
+    return text
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(word => word.length > 1 && !STOP_WORDS.has(word))
+        .join(" ");
 }
 
 function extractPageNumbers(message: string): number[] {
@@ -475,44 +519,80 @@ async function fetchRelevantContext(
     } else if (allFragments.length === 0) {
         const ftsKeywords = extractStructuralKeywords(query);
 
-        // LLAMADA A LA EDGE FUNCTION DE SUPABASE (protegida con try/catch)
+        // ──────────────────────────────────────────────
+        // BÚSQUEDA HÍBRIDA RRF DIRECTA DESDE NODE.JS
+        // ──────────────────────────────────────────────
         try {
-            const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-            const edgeFunctionKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-            
-            if (supabaseUrl && edgeFunctionKey) {
-                const edgeFunctionUrl = `${supabaseUrl}/functions/v1/embed-query`;
-                const response = await fetch(edgeFunctionUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${edgeFunctionKey}`,
-                    },
-                    body: JSON.stringify({
-                        query: normalized.cleanQuery,
-                        matchCount,
-                        matchThreshold,
-                        ftsKeywords,
-                        pageFilter: null,
-                        unitFilter: unitFilter,
-                    }),
-                });
+            // 1. Generar embedding vectorial localmente en Node.js (~15-30ms)
+            const queryEmbedding = await getQueryEmbedding(normalized.cleanQuery);
 
-                if (response.ok) {
-                    const { data } = await response.json();
-                    allFragments = data ?? [];
-                }
+            // 2. Ejecutar la función RPC hybrid_search_rrf directamente en Supabase
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const { data: rrfData, error: rrfError } = await (supabase.rpc as any)("hybrid_search_rrf", {
+                query_text: ftsKeywords || query,
+                query_embedding: queryEmbedding,
+                match_count: matchCount,
+                rrf_k: 60,
+                similarity_threshold: matchThreshold,
+            });
+
+            if (!rrfError && rrfData && rrfData.length > 0) {
+                allFragments = rrfData.map((row: { content: string; metadata?: KnowledgeFragment['metadata']; similarity: number; rrf_score: number }) => ({
+                    content: row.content,
+                    similarity: Math.max(row.similarity, row.rrf_score * 30),
+                    metadata: row.metadata,
+                }));
+                log("info", "RAG", `Búsqueda Híbrida RRF (Node.js) encontró ${allFragments.length} fragmentos`);
+            } else if (rrfError) {
+                log("warn", "RAG", "Error en RPC hybrid_search_rrf, intentando fallback legacy...", rrfError);
             }
-        } catch (edgeErr) {
-            log("warn", "RAG", "No se pudo conectar a la Edge Function de Supabase, continuando...", edgeErr);
+        } catch (embErr) {
+            log("warn", "RAG", "Error generando embedding local o en RPC RRF", embErr);
+        }
+
+        // NIVEL 2: Fallback FTS directo si RRF no devolvió resultados
+        if (allFragments.length === 0) {
+            try {
+                const ftsClean = removeStopWords(query);
+                if (ftsClean.length > 2) {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    const { data: ftsData } = await (supabase.from as any)("knowledge_embeddings")
+                        .select("content, metadata")
+                        .textSearch("content", ftsClean, { type: "websearch", config: "spanish" })
+                        .limit(matchCount);
+
+                    if (ftsData && ftsData.length > 0) {
+                        allFragments = ftsData.map((row: { content: string; metadata?: KnowledgeFragment['metadata'] }) => ({
+                            content: row.content,
+                            similarity: 0.5, // Score medio para FTS directo
+                            metadata: row.metadata,
+                        }));
+                        log("info", "RAG", `FTS directo encontró ${allFragments.length} fragmentos para: "${ftsClean}"`);
+                    }
+                }
+            } catch (ftsErr) {
+                log("warn", "RAG", "FTS directo falló", ftsErr);
+            }
         }
     }
 
     log("info", "RAG", `Búsqueda en ${Date.now() - start}ms`, {
         mode: queryMode, pages: pageNumbers, matchCount,
+        fragmentsFound: allFragments.length,
     });
 
-    const fragments = allFragments;
+    // ──────────────────────────────────────────────
+    // FILTRO DE CALIDAD: Eliminar fragmentos de baja relevancia
+    // Solo para búsquedas temáticas (no afecta búsquedas por página)
+    // ──────────────────────────────────────────────
+    const MIN_QUALITY_THRESHOLD = 0.12;
+    const fragments = queryMode === "page"
+        ? allFragments
+        : allFragments.filter(f => f.similarity >= MIN_QUALITY_THRESHOLD);
+
+    if (fragments.length < allFragments.length) {
+        log("info", "RAG", `Filtro de calidad: ${allFragments.length} → ${fragments.length} fragmentos (umbral: ${MIN_QUALITY_THRESHOLD})`);
+    }
 
     const ragContext: RagContext = {
         totalFragments: fragments.length,
@@ -555,8 +635,8 @@ function buildSystemPrompt(
             : "Responde en el mismo idioma que use el usuario.";
 
     const bookContext = contextText.length > 0
-        ? `\n\n--- FRAGMENTOS EXACTOS RECUPERADOS DEL LIBRO DE RUSSELL & NORVIG ---\n${contextText}\n--- FIN DE FRAGMENTOS ---\n\nINSTRUCCIÓN DE FIDELIDAD ESTRICTA:\n1. Basado ÚNICAMENTE en los fragmentos anteriores, explica el contenido exacto del libro.\n2. Si los fragmentos anteriores corresponden a páginas del índice o títulos de temas sin desarrollo de texto teórico extenso, indica explícitamente los temas que aparecen en esas páginas sin inventar teoría adicional que no esté escrita ahí.\n3. NUNCA agregues información externa fuera del texto recuperado.\n4. Cita las páginas impresas exactamente con [Página X].\n5. REGLA DE CITADO TEXTUAL OBLIGATORIA: Cada vez que incluyas un fragmento, frase, oración o párrafo tomado TEXTUALMENTE del libro, DEBES encerrarlo entre comillas dobles. Ejemplo: "El agente racional es aquel que actúa para maximizar su medida de rendimiento." Esto permite al usuario distinguir claramente qué es texto literal del libro y qué es tu explicación o paráfrasis. Si parafraseas, NO uses comillas; las comillas son EXCLUSIVAMENTE para texto copiado tal cual del libro.`
-        : "\n\n(No hay fragmentos específicos recuperados para esta consulta).";
+        ? `\n\n--- FRAGMENTOS EXACTOS RECUPERADOS DEL LIBRO DE RUSSELL & NORVIG ---\n${contextText}\n--- FIN DE FRAGMENTOS ---\n\nINSTRUCCIÓN DE FIDELIDAD ESTRICTA (PRIORIDAD ABSOLUTA):\n1. Tu ÚNICA fuente de verdad son los fragmentos anteriores. Responde basándote EXCLUSIVAMENTE en ellos.\n2. Si los fragmentos corresponden a páginas del índice o títulos sin desarrollo teórico extenso, indica los temas que aparecen sin inventar teoría adicional.\n3. PROHIBICIÓN TOTAL: NUNCA agregues información que NO esté explícitamente escrita en los fragmentos recuperados. No completes, no expandas, no añadas conocimiento propio.\n4. Cita las páginas impresas exactamente con [Página X].\n5. REGLA DE CITADO TEXTUAL OBLIGATORIA: Cada vez que incluyas texto TEXTUAL del libro, enciérralo entre comillas dobles. Ejemplo: "El agente racional es aquel que actúa para maximizar su medida de rendimiento." Si parafraseas, NO uses comillas.\n6. Si los fragmentos recuperados NO contienen la respuesta que el usuario busca, DEBES decir: "He buscado en la base de datos del libro y no encontré información específica sobre [tema]. Te sugiero reformular tu pregunta o consultar por una página o capítulo específico." NUNCA improvises una respuesta con tu conocimiento interno.`
+        : `\n\nALERTA: NO SE ENCONTRARON FRAGMENTOS RELEVANTES EN EL LIBRO.\n\nINSTRUCCIÓN OBLIGATORIA DE RECHAZO:\n- El sistema de búsqueda NO encontró información relevante sobre la consulta del usuario en el libro "Inteligencia Artificial: Un Enfoque Moderno".\n- DEBES responder EXACTAMENTE con una variación de: "He realizado una búsqueda exhaustiva en el libro *Inteligencia Artificial: Un Enfoque Moderno* de Russell & Norvig y no encontré información específica sobre ese tema en los fragmentos indexados. Te sugiero:\n  1. Reformular tu pregunta usando términos más específicos del libro (ej: 'búsqueda heurística', 'agentes reactivos', 'redes bayesianas').\n  2. Consultar por una página o capítulo específico (ej: 'resumen de la página 95')."\n- PROHIBICIÓN ABSOLUTA: NO respondas usando tu conocimiento interno. NO inventes. NO generes contenido que no provenga de los fragmentos del libro.`;
 
     return `Eres ARIA, la Asistente de Referencia en Inteligencia Artificial especializada EXCLUSIVAMENTE en el libro "Inteligencia Artificial: Un Enfoque Moderno" (2ª Edición) de Stuart J. Russell & Peter Norvig.
 

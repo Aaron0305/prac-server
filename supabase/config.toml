@@ -1,0 +1,19 @@
+# Archivo de configuración oficial de Supabase CLI
+project_id = "ingles-backend"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+
+[db]
+port = 54322
+shadow_port = 54320
+
+[studio]
+enabled = true
+port = 54323
+
+[functions.embed-query]
+verify_jwt = false
