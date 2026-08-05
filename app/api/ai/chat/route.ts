@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getCorsHeaders } from "@/lib/cors";
 import Groq from "groq-sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 import { createClient } from "@supabase/supabase-js";
 import { franc } from "franc";
@@ -818,18 +819,20 @@ export async function POST(request: Request) {
 
     const { message, historyContext, teacherId } = validation.data;
 
+    const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
     const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) {
-        log("error", "Config", "GROQ_API_KEY no definida");
+
+    if (!geminiApiKey && !apiKey) {
+        log("error", "Config", "Ni GEMINI_API_KEY ni GROQ_API_KEY están definidas");
         return NextResponse.json({ error: "Error de configuración del servidor." }, { status: 500, headers: corsHeaders });
     }
 
     const lang = detectLanguage(message);
-    const questionType = detectQuestionType(message);   // ← ahora puede devolver "page"
+    const questionType = detectQuestionType(message);
     const followUp = isFollowUpMessage(message);
 
     log("info", "Request", `Idioma: ${lang} | Tipo: ${questionType} | FollowUp: ${followUp}`, {
-        ip, messageLength: message.length,
+        ip, messageLength: message.length, provider: geminiApiKey ? "gemini" : "groq"
     });
 
     let contextText = "";
@@ -851,10 +854,7 @@ export async function POST(request: Request) {
         contextText = result.contextText;
         ragContext = result.ragContext;
     } catch (ragError) {
-        const isEmbeddingTimeout = ragError instanceof Error && ragError.message === "embedding_timeout";
-        log("warn", "RAG", isEmbeddingTimeout
-            ? "Timeout en embeddings, se omite contexto"
-            : "No se pudo obtener contexto del libro", ragError);
+        log("warn", "RAG", "No se pudo obtener contexto del libro", ragError);
     }
 
     const systemPrompt = buildSystemPrompt(contextText, lang);
@@ -864,6 +864,89 @@ export async function POST(request: Request) {
         .map(({ role, content }) => ({ role, content }));
 
     try {
+        // ============================================================
+        // OPCIÓN 1: MOTOR PRIMARIO — GOOGLE GEMINI 1.5 FLASH (1M Token Context Window)
+        // ============================================================
+        if (geminiApiKey) {
+            try {
+                const targetGeminiModel = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+                log("info", "Gemini", `Iniciando streaming con Google Gemini (${targetGeminiModel} - 1M Tokens)...`);
+                const genAI = new GoogleGenerativeAI(geminiApiKey);
+                const model = genAI.getGenerativeModel({ model: targetGeminiModel });
+
+                // Formatear historial para Gemini
+                const contents: { role: string; parts: { text: string }[] }[] = [];
+
+                // Añadir system prompt + contexto en la instrucción inicial
+                contents.push({
+                    role: "user",
+                    parts: [{ text: `${systemPrompt}\n\nMENSAJE DEL USUARIO: ${message}` }]
+                });
+
+                const result = await model.generateContentStream({
+                    contents,
+                    generationConfig: {
+                        temperature: questionType === "complex" ? 0.4 : 0.2,
+                        maxOutputTokens: questionType === "page" ? 4000 : 2500,
+                    }
+                });
+
+                const encoder = new TextEncoder();
+                let fullReply = "";
+
+                const readableStream = new ReadableStream({
+                    async start(controller) {
+                        try {
+                            for await (const chunk of result.stream) {
+                                const text = chunk.text();
+                                if (text) {
+                                    fullReply += text;
+                                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
+                                }
+                            }
+                            controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+                            controller.close();
+
+                            const elapsed = Date.now() - requestStart;
+                            recordLatency(elapsed);
+                            log("info", "Gemini", `Stream completado exitosamente en ${elapsed}ms con Gemini 1.5 Flash`, {
+                                questionType, lang, contextFragments: ragContext.totalFragments, replyLength: fullReply.length
+                            });
+
+                            if (teacherId) {
+                                saveChatMessages(teacherId, message, fullReply, ragContext).catch(() => { });
+                            }
+                        } catch (streamErr) {
+                            metrics.totalErrors++;
+                            log("error", "GeminiStream", "Error durante streaming de Gemini", streamErr);
+                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: "Error durante la generación." })}\n\n`));
+                            controller.close();
+                        }
+                    }
+                });
+
+                return new Response(readableStream, {
+                    status: 200,
+                    headers: {
+                        ...corsHeaders,
+                        "Content-Type": "text/event-stream",
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                    },
+                });
+
+            } catch (geminiErr) {
+                log("warn", "Gemini", "Fallo en Gemini, cayendo a respaldo Groq...", geminiErr);
+            }
+        }
+
+        // ============================================================
+        // OPCIÓN 2: MOTOR RESPALDO — GROQ SDK (llama-3.3-70b-versatile)
+        // ============================================================
+        if (!apiKey) {
+            throw new Error("No hay API Key configurada para Groq ni Gemini");
+        }
+
         const groq = new Groq({ apiKey });
 
         const messagesForGroq: Parameters<typeof groq.chat.completions.create>[0]['messages'] = [
@@ -872,19 +955,17 @@ export async function POST(request: Request) {
             { role: "user", content: message },
         ];
 
-        // Pipeline de Resiliencia con Reintentos y Fallback para Groq (solo modelos activos)
         const fallbackModels = [
-            CONFIG.model,            // "llama-3.3-70b-versatile" (Modelo principal)
-            "llama-3.1-8b-instant",  // (Ultra rápido, alta cuota TPM)
-            "mixtral-8x7b-32768",   // (Excelente para contextos largos)
-            "gemma2-9b-it",          // (Fallback de Google)
+            CONFIG.model,
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it",
         ];
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let groqStream: any = null;
         let selectedModelUsed: string = CONFIG.model;
 
-        // Intentar primero con el modelo principal usando exponential backoff en caso de rate limit
         for (const targetModel of fallbackModels) {
             let attempts = 0;
             const maxAttemptsPerModel = targetModel === CONFIG.model ? 3 : 1;
@@ -900,7 +981,7 @@ export async function POST(request: Request) {
                         stream: true,
                     });
                     selectedModelUsed = targetModel;
-                    break; // Éxito
+                    break;
                 } catch (modelErr) {
                     const isRateLimit = modelErr instanceof Error && (
                         modelErr.message.includes("rate_limit") || 
@@ -908,18 +989,16 @@ export async function POST(request: Request) {
                         modelErr.message.includes("TPM")
                     );
 
-                    log("warn", "GroqFallback", `Fallo en modelo ${targetModel} (Intento ${attempts}/${maxAttemptsPerModel}, ${isRateLimit ? "Rate Limit/TPM" : "Error"})`);
+                    log("warn", "GroqFallback", `Fallo en modelo ${targetModel} (${isRateLimit ? "Rate Limit" : "Error"})`);
 
                     if (isRateLimit && attempts < maxAttemptsPerModel) {
-                        // Exponential backoff: 1.2s en intento 1, 2.5s en intento 2
                         const backoffMs = attempts * 1250;
-                        log("info", "GroqFallback", `Pausa de ${backoffMs}ms por Rate Limit antes de reintentar...`);
                         await new Promise(res => setTimeout(res, backoffMs));
                     }
                 }
             }
 
-            if (groqStream) break; // Si tuvimos éxito con este modelo, salir del bucle de modelos
+            if (groqStream) break;
         }
 
         if (!groqStream) {
