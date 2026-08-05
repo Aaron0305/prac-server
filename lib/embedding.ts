@@ -1,18 +1,21 @@
 import { pipeline } from '@huggingface/transformers';
 
-// Singleton para cargar el modelo 'Supabase/gte-small' en memoria una sola vez
+// Inicializar y pre-cargar el modelo 'Supabase/gte-small' en el arranque del servidor
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let extractorPromise: Promise<any> | null = null;
+const extractorPromise: Promise<any> = pipeline('feature-extraction', 'Supabase/gte-small').catch(err => {
+    console.error("Error pre-cargando modelo de embeddings en servidor:", err);
+    return null;
+});
 
 /**
  * Genera el vector embedding (384 dimensiones) para una consulta de texto
  * en Node.js usando el modelo nativo Supabase/gte-small.
  */
 export async function getQueryEmbedding(text: string): Promise<number[]> {
-  if (!extractorPromise) {
-    extractorPromise = pipeline('feature-extraction', 'Supabase/gte-small');
-  }
   const extractor = await extractorPromise;
+  if (!extractor) {
+      throw new Error("El modelo de embeddings no pudo cargarse.");
+  }
   const output = await extractor(text, { pooling: 'mean', normalize: true });
   return Array.from(output.data as Float32Array);
 }

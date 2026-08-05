@@ -877,12 +877,12 @@ export async function POST(request: Request) {
             { role: "user", content: message },
         ];
 
-        // Pipeline de Resiliencia con Reintentos y Fallback para Groq
+        // Pipeline de Resiliencia con Reintentos y Fallback para Groq (solo modelos activos)
         const fallbackModels = [
-            CONFIG.model, // "llama-3.3-70b-versatile"
-            "llama-3.1-8b-instant",
-            "llama3-70b-8192",
-            "gemma2-9b-it",
+            CONFIG.model,            // "llama-3.3-70b-versatile" (Modelo principal)
+            "llama-3.1-8b-instant",  // (Ultra rápido, alta cuota TPM)
+            "mixtral-8x7b-32768",   // (Excelente para contextos largos)
+            "gemma2-9b-it",          // (Fallback de Google)
         ];
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
